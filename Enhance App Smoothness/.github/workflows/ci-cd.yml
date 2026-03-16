@@ -1,0 +1,231 @@
+name: Flutter Mobile CI
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/ci-cd.yml"
+      - "flutter_mobile/**"
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/ci-cd.yml"
+      - "flutter_mobile/**"
+  workflow_dispatch:
+    inputs:
+      release_channel:
+        description: "Release channel label for artifact naming"
+        required: false
+        default: "production"
+
+permissions:
+  contents: read
+
+jobs:
+  quality:
+    name: Analyze and test
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: flutter_mobile
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Install dependencies
+        run: flutter pub get
+
+      - name: Enforce formatting
+        run: dart format --output=none --set-exit-if-changed lib test
+
+      - name: Analyze code
+        run: flutter analyze
+
+      - name: Run widget tests
+        run: flutter test
+
+  security-audit:
+    name: Secret and release audit
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Scan repository for forbidden secrets
+        run: |
+          if rg -n --hidden \
+            --glob '!flutter_mobile/build/**' \
+            --glob '!flutter_mobile/.dart_tool/**' \
+            --glob '!flutter_mobile/pubspec.lock' \
+            '(postgresql://|service_role|SUPABASE_SERVICE_ROLE_KEY|OPENROUTER_API_KEY|sb_secret_|sk-or-v1-[A-Za-z0-9]+|-----BEGIN PRIVATE KEY-----)' \
+            flutter_mobile; then
+            echo "Potential secret or forbidden credential material detected."
+            exit 1
+          fi
+
+      - name: Verify Android signing files are not committed
+        run: |
+          if [ -f flutter_mobile/android/key.properties ]; then
+            echo "android/key.properties must not be committed."
+            exit 1
+          fi
+
+      - name: Verify temporary Dart probe files are not committed
+        run: |
+          if rg --files flutter_mobile | rg '(^|/)tool_temp.*\.dart$'; then
+            echo "Temporary Dart probe files must not be committed."
+            exit 1
+          fi
+
+      - name: Publish audit summary
+        run: |
+          {
+            echo "## Security audit"
+            echo "- Secret scan passed"
+            echo "- Android signing file is not committed"
+            echo "- Temporary Dart probe files are not committed"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  web-release:
+    name: Build web release
+    runs-on: ubuntu-latest
+    needs: [quality, security-audit]
+    if: github.event_name != 'pull_request'
+    defaults:
+      run:
+        working-directory: flutter_mobile
+    env:
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
+      ASSISTANT_API_URL: ${{ secrets.ASSISTANT_API_URL }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Install dependencies
+        run: flutter pub get
+
+      - name: Validate release secrets
+        run: |
+          if [ -z "$SUPABASE_URL" ] || [ -z "$SUPABASE_ANON_KEY" ]; then
+            echo "Missing SUPABASE_URL or SUPABASE_ANON_KEY GitHub secret."
+            exit 1
+          fi
+
+      - name: Build web app
+        run: >
+          flutter build web --release
+          --dart-define=SUPABASE_URL=$SUPABASE_URL
+          --dart-define=SUPABASE_ANON_KEY=$SUPABASE_ANON_KEY
+          --dart-define=ASSISTANT_API_URL=$ASSISTANT_API_URL
+
+      - name: Upload web artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: web-release
+          path: flutter_mobile/build/web
+
+      - name: Publish web summary
+        run: |
+          {
+            echo "## Web release"
+            echo "- Artifact: web-release"
+            echo "- Build path: flutter_mobile/build/web"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  android-release:
+    name: Build Android release
+    runs-on: ubuntu-latest
+    needs: [quality, security-audit]
+    if: github.event_name != 'pull_request'
+    defaults:
+      run:
+        working-directory: flutter_mobile
+    env:
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
+      ASSISTANT_API_URL: ${{ secrets.ASSISTANT_API_URL }}
+      ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+      ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+      ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+      ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Install dependencies
+        run: flutter pub get
+
+      - name: Validate release secrets
+        run: |
+          if [ -z "$SUPABASE_URL" ] || [ -z "$SUPABASE_ANON_KEY" ] || [ -z "$ANDROID_KEYSTORE_BASE64" ] || [ -z "$ANDROID_KEYSTORE_PASSWORD" ] || [ -z "$ANDROID_KEY_ALIAS" ] || [ -z "$ANDROID_KEY_PASSWORD" ]; then
+            echo "Missing one or more Android release secrets."
+            exit 1
+          fi
+
+      - name: Prepare Android signing
+        run: |
+          echo "$ANDROID_KEYSTORE_BASE64" | base64 --decode > android/upload-keystore.jks
+          cat <<EOF > android/key.properties
+          storePassword=$ANDROID_KEYSTORE_PASSWORD
+          keyPassword=$ANDROID_KEY_PASSWORD
+          keyAlias=$ANDROID_KEY_ALIAS
+          storeFile=upload-keystore.jks
+          EOF
+
+      - name: Build Android App Bundle
+        run: >
+          flutter build appbundle --release
+          --dart-define=SUPABASE_URL=$SUPABASE_URL
+          --dart-define=SUPABASE_ANON_KEY=$SUPABASE_ANON_KEY
+          --dart-define=ASSISTANT_API_URL=$ASSISTANT_API_URL
+
+      - name: Build Android APK
+        run: >
+          flutter build apk --release
+          --dart-define=SUPABASE_URL=$SUPABASE_URL
+          --dart-define=SUPABASE_ANON_KEY=$SUPABASE_ANON_KEY
+          --dart-define=ASSISTANT_API_URL=$ASSISTANT_API_URL
+
+      - name: Upload Android App Bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-release-aab
+          path: flutter_mobile/build/app/outputs/bundle/release/app-release.aab
+
+      - name: Upload Android artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-release-apk
+          path: flutter_mobile/build/app/outputs/flutter-apk/app-release.apk
+
+      - name: Publish Android summary
+        run: |
+          {
+            echo "## Android release"
+            echo "- Artifact: android-release-apk"
+            echo "- Artifact: android-release-aab"
+            echo "- Signing source: GitHub Actions secrets"
+          } >> "$GITHUB_STEP_SUMMARY"
