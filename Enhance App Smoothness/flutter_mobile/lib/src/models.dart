@@ -98,6 +98,8 @@ extension TaskCategoryX on TaskCategory {
   }
 }
 
+enum TaskSyncStatus { pending, synced, deleted }
+
 TaskPriority taskPriorityFromApi(String? value) {
   switch (value) {
     case 'low':
@@ -175,7 +177,8 @@ class AppSettings {
 
 class TaskItem {
   const TaskItem({
-    required this.id,
+    required this.localId,
+    this.serverId,
     required this.title,
     required this.completed,
     required this.dueDate,
@@ -191,9 +194,12 @@ class TaskItem {
     this.completedAt,
     this.createdAt,
     this.updatedAt,
+    this.syncStatus = TaskSyncStatus.synced,
   });
 
-  final String id;
+  final String localId;
+  final String? serverId;
+  String get id => serverId ?? localId;
   final String title;
   final bool completed;
   final DateTime dueDate;
@@ -209,9 +215,11 @@ class TaskItem {
   final DateTime? completedAt;
   final DateTime? createdAt;
   final DateTime? updatedAt;
+  final TaskSyncStatus syncStatus;
 
   TaskItem copyWith({
-    String? id,
+    String? localId,
+    String? serverId,
     String? title,
     bool? completed,
     DateTime? dueDate,
@@ -227,9 +235,11 @@ class TaskItem {
     DateTime? completedAt,
     DateTime? createdAt,
     DateTime? updatedAt,
+    TaskSyncStatus? syncStatus,
   }) {
     return TaskItem(
-      id: id ?? this.id,
+      localId: localId ?? this.localId,
+      serverId: serverId ?? this.serverId,
       title: title ?? this.title,
       completed: completed ?? this.completed,
       dueDate: dueDate ?? this.dueDate,
@@ -245,6 +255,7 @@ class TaskItem {
       completedAt: completedAt ?? this.completedAt,
       createdAt: createdAt ?? this.createdAt,
       updatedAt: updatedAt ?? this.updatedAt,
+      syncStatus: syncStatus ?? this.syncStatus,
     );
   }
 
@@ -255,7 +266,10 @@ class TaskItem {
         .toList(growable: false);
 
     return TaskItem(
-      id: json['id']?.toString() ?? '',
+      localId: json['localId']?.toString() ??
+          json['id']?.toString() ??
+          'task-${DateTime.now().microsecondsSinceEpoch}',
+      serverId: json['id']?.toString(),
       title: json['title']?.toString() ?? '',
       completed: json['completed'] == true,
       dueDate: DateTime(dueDate.year, dueDate.month, dueDate.day),
@@ -271,11 +285,20 @@ class TaskItem {
       completedAt: _parseDateTime(json['completedAt']),
       createdAt: _parseDateTime(json['createdAt']),
       updatedAt: _parseDateTime(json['updatedAt']),
+      syncStatus: _syncStatusFromString(json['syncStatus']?.toString()),
     );
   }
 
-  factory TaskItem.fromJson(Map<String, dynamic> json) =>
-      TaskItem.fromApi(json);
+  factory TaskItem.fromJson(Map<String, dynamic> json) {
+    final apiTask = TaskItem.fromApi(json);
+    return apiTask.copyWith(
+      localId: json['localId']?.toString() ?? apiTask.localId,
+      serverId: json['serverId']?.toString() ?? apiTask.serverId,
+      syncStatus:
+          _syncStatusFromString(json['syncStatus']?.toString()) ??
+              apiTask.syncStatus,
+    );
+  }
 
   Map<String, dynamic> toApi() {
     return {
@@ -298,7 +321,51 @@ class TaskItem {
     };
   }
 
-  Map<String, dynamic> toJson() => toApi();
+  Map<String, dynamic> toPayload() {
+    final payload = <String, dynamic>{};
+    payload.addAll({
+      'title': title,
+      'description': description?.trim(),
+      'priority': priority.apiValue,
+      'category': category.apiValue,
+      'dueDate': dueDate.toIso8601String(),
+      'dueTime': dueTime == null ? null : _formatTime(dueTime!),
+      'reminder': reminder,
+      'repeat': repeat,
+      'subtasks': subtasks,
+      'completedSubtasks': completedSubtasks,
+      'completed': completed,
+      'completedAt': completed
+          ? (completedAt?.toIso8601String() ??
+              DateTime.now().toIso8601String())
+          : null,
+    });
+    return payload;
+  }
+
+  Map<String, dynamic> toJson() {
+    return {
+      'id': id,
+      'localId': localId,
+      'serverId': serverId,
+      'syncStatus': syncStatus.name,
+      'title': title,
+      'completed': completed,
+      'dueDate': _formatDate(dueDate),
+      'dueLabel': dueLabel.isEmpty ? _buildRelativeDueLabel(dueDate) : dueLabel,
+      'priority': priority.apiValue,
+      'category': category.apiValue,
+      'description': description,
+      'reminder': reminder,
+      'repeat': repeat,
+      'subtasks': subtasks,
+      'completedSubtasks': completedSubtasks,
+      'dueTime': dueTime == null ? null : _formatTime(dueTime!),
+      'completedAt': completedAt?.toIso8601String(),
+      'createdAt': createdAt?.toIso8601String(),
+      'updatedAt': updatedAt?.toIso8601String(),
+    };
+  }
 }
 
 class TaskTemplate {
@@ -385,6 +452,86 @@ class TaskAttachment {
       'mimeType': mimeType,
       'sizeBytes': sizeBytes,
       'createdAt': createdAt?.toIso8601String(),
+    };
+  }
+}
+
+enum PendingTaskOperationType { create, update, delete }
+
+PendingTaskOperationType _pendingOperationTypeFromString(String? value) {
+  if (value == null) {
+    return PendingTaskOperationType.create;
+  }
+  switch (value.toLowerCase()) {
+    case 'update':
+      return PendingTaskOperationType.update;
+    case 'delete':
+      return PendingTaskOperationType.delete;
+    default:
+      return PendingTaskOperationType.create;
+  }
+}
+
+class PendingTaskOperation {
+  PendingTaskOperation({
+    required this.id,
+    required this.type,
+    required this.localId,
+    this.serverId,
+    required this.payload,
+    this.retryCount = 0,
+    DateTime? createdAt,
+  }) : createdAt = createdAt ?? DateTime.now();
+
+  final String id;
+  final PendingTaskOperationType type;
+  final String localId;
+  final String? serverId;
+  final Map<String, dynamic> payload;
+  final int retryCount;
+  final DateTime createdAt;
+
+  PendingTaskOperation copyWith({
+    String? id,
+    PendingTaskOperationType? type,
+    String? localId,
+    String? serverId,
+    Map<String, dynamic>? payload,
+    int? retryCount,
+    DateTime? createdAt,
+  }) {
+    return PendingTaskOperation(
+      id: id ?? this.id,
+      type: type ?? this.type,
+      localId: localId ?? this.localId,
+      serverId: serverId ?? this.serverId,
+      payload: payload ?? this.payload,
+      retryCount: retryCount ?? this.retryCount,
+      createdAt: createdAt ?? this.createdAt,
+    );
+  }
+
+  factory PendingTaskOperation.fromJson(Map<String, dynamic> json) {
+    return PendingTaskOperation(
+      id: json['id']?.toString() ?? 'op-${DateTime.now().microsecondsSinceEpoch}',
+      type: _pendingOperationTypeFromString(json['type']?.toString()),
+      localId: json['localId']?.toString() ?? '',
+      serverId: json['serverId']?.toString(),
+      payload: Map<String, dynamic>.from(json['payload'] as Map? ?? {}),
+      retryCount: (json['retryCount'] as num?)?.toInt() ?? 0,
+      createdAt: _parseDateTime(json['createdAt']) ?? DateTime.now(),
+    );
+  }
+
+  Map<String, dynamic> toJson() {
+    return {
+      'id': id,
+      'type': type.name,
+      'localId': localId,
+      'serverId': serverId,
+      'payload': payload,
+      'retryCount': retryCount,
+      'createdAt': createdAt.toIso8601String(),
     };
   }
 }
@@ -635,6 +782,22 @@ String _formatTime(TimeOfDay time) {
   return '${time.hour.toString().padLeft(2, '0')}:${time.minute.toString().padLeft(2, '0')}';
 }
 
+TaskSyncStatus _syncStatusFromString(String? raw) {
+  if (raw == null) {
+    return TaskSyncStatus.synced;
+  }
+
+  switch (raw.toLowerCase()) {
+    case 'pending':
+      return TaskSyncStatus.pending;
+    case 'deleted':
+      return TaskSyncStatus.deleted;
+    case 'synced':
+    default:
+      return TaskSyncStatus.synced;
+  }
+}
+
 String _formatDisplayTime(TimeOfDay time) {
   final hour = time.hourOfPeriod == 0 ? 12 : time.hourOfPeriod;
   final minute = time.minute.toString().padLeft(2, '0');
@@ -678,6 +841,8 @@ String _buildRelativeDueLabel(DateTime date) {
   ];
   return '${months[date.month - 1]} ${date.day}';
 }
+
+String buildRelativeDueLabel(DateTime date) => _buildRelativeDueLabel(date);
 
 String formatFileSizeLabel(int sizeBytes) {
   if (sizeBytes < 1024) {

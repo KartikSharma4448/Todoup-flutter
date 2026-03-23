@@ -109,9 +109,13 @@ class HomeTab extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final controller = TodoAppScope.of(context);
-    final tasks = controller.tasks;
-    final completed = controller.completedTasks;
+    final tasks = controller.activeTabTasks;
+    final completed = tasks.where((task) => task.completed).length;
     final total = tasks.length;
+    final progress = controller.activeTabCompletionRate;
+    final greetingTitle = total == 0
+        ? 'Plan your ${controller.activeTab.label.toLowerCase()} tasks'
+        : 'Good Morning!';
 
     return Stack(
       children: [
@@ -142,7 +146,7 @@ class HomeTab extends StatelessWidget {
             slivers: [
               SliverToBoxAdapter(
                 child: GradientHeader(
-                  title: total == 0 ? 'Plan your day' : 'Good Morning!',
+                  title: greetingTitle,
                   subtitle: formatFullDate(DateTime.now()),
                   trailing: _HomeRefreshButton(
                     isLoading: controller.isLoading,
@@ -191,7 +195,7 @@ class HomeTab extends StatelessWidget {
                                   ),
                                 ),
                                 Text(
-                                  '${(controller.completionRate * 100).round()}%',
+                                '${(progress * 100).round()}%',
                                   style: Theme.of(context)
                                       .textTheme
                                       .headlineMedium
@@ -204,7 +208,7 @@ class HomeTab extends StatelessWidget {
                               borderRadius: BorderRadius.circular(999),
                               child: LinearProgressIndicator(
                                 minHeight: 10,
-                                value: controller.completionRate,
+                              value: progress,
                                 backgroundColor:
                                     Theme.of(context).brightness ==
                                         Brightness.dark
@@ -217,6 +221,11 @@ class HomeTab extends StatelessWidget {
                             ),
                           ],
                         ),
+                      ),
+                      const SizedBox(height: 16),
+                      _TaskFilterTabs(
+                        activeTab: controller.activeTab,
+                        onTabSelected: controller.setActiveTab,
                       ),
                       if (controller.error != null) ...[
                         const SizedBox(height: 16),
@@ -638,6 +647,43 @@ class _OfflineBanner extends StatelessWidget {
           ),
         ],
       ),
+    );
+  }
+}
+
+class _TaskFilterTabs extends StatelessWidget {
+  const _TaskFilterTabs({
+    required this.activeTab,
+    required this.onTabSelected,
+  });
+
+  final TaskFilterTab activeTab;
+  final ValueChanged<TaskFilterTab> onTabSelected;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Wrap(
+      spacing: 10,
+      runSpacing: 6,
+      children: TaskFilterTab.values.map((tab) {
+        final selected = activeTab == tab;
+        return ChoiceChip(
+          label: Text(tab.label),
+          selected: selected,
+          onSelected: (value) {
+            if (value) {
+              onTabSelected(tab);
+            }
+          },
+          selectedColor: AppColors.primary,
+          backgroundColor: theme.colorScheme.surfaceContainerHighest,
+          labelStyle: theme.textTheme.bodySmall?.copyWith(
+            color: selected ? Colors.white : theme.textTheme.bodySmall?.color,
+            fontWeight: selected ? FontWeight.w700 : FontWeight.w500,
+          ),
+        );
+      }).toList(),
     );
   }
 }

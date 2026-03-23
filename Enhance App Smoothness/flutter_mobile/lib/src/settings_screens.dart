@@ -517,7 +517,7 @@ class SettingsScreen extends StatelessWidget {
                         leading: Icon(Icons.info_outline_rounded),
                         title: Text('App Information'),
                       ),
-                      _InfoRow(label: 'Version', value: '1.0.0'),
+                      _InfoRow(label: 'Version', value: '1.0.3'),
                       SizedBox(height: 8),
                       _InfoRow(label: 'Build', value: '2026.03.06'),
                     ],

@@ -12,34 +12,8 @@ val keystoreProperties = Properties()
 val keystorePropertiesFile = rootProject.file("key.properties")
 if (keystorePropertiesFile.exists()) {
     keystoreProperties.load(FileInputStream(keystorePropertiesFile))
-}
-
-val releaseStoreFile =
-    keystoreProperties.getProperty("storeFile")
-        ?: System.getenv("ANDROID_KEYSTORE_PATH")
-val releaseStorePassword =
-    keystoreProperties.getProperty("storePassword")
-        ?: System.getenv("ANDROID_KEYSTORE_PASSWORD")
-val releaseKeyAlias =
-    keystoreProperties.getProperty("keyAlias")
-        ?: System.getenv("ANDROID_KEY_ALIAS")
-val releaseKeyPassword =
-    keystoreProperties.getProperty("keyPassword")
-        ?: System.getenv("ANDROID_KEY_PASSWORD")
-val hasReleaseSigning =
-    !releaseStoreFile.isNullOrBlank() &&
-        !releaseStorePassword.isNullOrBlank() &&
-        !releaseKeyAlias.isNullOrBlank() &&
-        !releaseKeyPassword.isNullOrBlank()
-val releaseTaskRequested =
-    gradle.startParameter.taskNames.any { taskName ->
-        taskName.contains("release", ignoreCase = true)
-    }
-
-if (releaseTaskRequested && !hasReleaseSigning) {
-    throw GradleException(
-        "Release signing is not configured. Provide android/key.properties or ANDROID_KEYSTORE_* environment variables before building a release artifact.",
-    )
+} else {
+    throw GradleException("Release signing keystoreProperties not found at android/key.properties")
 }
 
 android {
@@ -68,12 +42,10 @@ android {
 
     signingConfigs {
         create("release") {
-            if (hasReleaseSigning) {
-                storeFile = rootProject.file(releaseStoreFile!!)
-                storePassword = releaseStorePassword
-                keyAlias = releaseKeyAlias
-                keyPassword = releaseKeyPassword
-            }
+            storeFile = rootProject.file(keystoreProperties["storeFile"]!!)
+            storePassword = keystoreProperties["storePassword"] as String
+            keyAlias = keystoreProperties["keyAlias"] as String
+            keyPassword = keystoreProperties["keyPassword"] as String
         }
     }
 

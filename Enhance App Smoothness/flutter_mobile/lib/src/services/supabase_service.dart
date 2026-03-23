@@ -4,15 +4,17 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
 import 'package:supabase_flutter/supabase_flutter.dart';
+import 'package:uuid/uuid.dart';
 
-import 'assistant_config.dart';
-import 'models.dart';
-import 'supabase_config.dart';
+import '../assistant_config.dart';
+import '../models.dart';
+import '../supabase_config.dart';
 
-class ApiService {
-  ApiService() : _client = Supabase.instance.client;
+class SupabaseService {
+  SupabaseService() : _client = Supabase.instance.client;
 
   final SupabaseClient _client;
+  static const _uuid = Uuid();
 
   static String get baseUrl => SupabaseConfig.baseUrlForMessages;
   static const String _attachmentBucket = 'task-attachments';
@@ -450,8 +452,10 @@ class ApiService {
         status == 'done' ||
         row['completed_at'] != null;
 
+    final serverId = row['id']?.toString();
     return TaskItem(
-      id: row['id']?.toString() ?? '',
+      localId: serverId ?? 'local-${_uuid.v4()}',
+      serverId: serverId,
       title: row['title']?.toString() ?? '',
       completed: completed,
       dueDate: DateTime(dueDate.year, dueDate.month, dueDate.day),

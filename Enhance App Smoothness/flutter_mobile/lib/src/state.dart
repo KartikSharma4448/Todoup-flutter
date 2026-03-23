@@ -6,38 +6,48 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
 import 'auth_service.dart';
-import 'api_service.dart';
 import 'connectivity_service.dart';
 import 'models.dart';
 import 'notification_service.dart';
-import 'offline_task_repository.dart';
+import 'services/local_database_service.dart';
+import 'services/sync_manager.dart';
+import 'services/supabase_service.dart';
+import 'services/task_repository.dart';
 import 'smart_widget_service.dart';
 import 'task_templates.dart';
 
 class TodoAppController extends ChangeNotifier {
   TodoAppController({
-    ApiService? api,
     NotificationService? notifications,
     SmartWidgetService? widgets,
     AuthService? auth,
-    OfflineTaskRepository? offline,
     ConnectivityService? connectivity,
-  }) : _api = api ?? ApiService(),
-       _notifications = notifications ?? NotificationService.instance,
-       _widgets = widgets ?? SmartWidgetService.instance,
-       _auth = auth ?? AuthService.instance,
-       _offline = offline ?? OfflineTaskRepository.instance,
-       _connectivity = connectivity ?? ConnectivityService.instance {
-    _authSubscription = _api.authStateChanges.listen(_handleAuthStateChange);
+    SupabaseService? supabase,
+    LocalDatabaseService? localDatabase,
+    TaskRepository? taskRepository,
+  })  : _supabase = supabase ?? SupabaseService(),
+        _localDatabase = localDatabase ?? LocalDatabaseService.instance,
+        _connectivity = connectivity ?? ConnectivityService.instance,
+        _notifications = notifications ?? NotificationService.instance,
+        _widgets = widgets ?? SmartWidgetService.instance,
+        _auth = auth ?? AuthService.instance {
+    _taskRepository = taskRepository ??
+        TaskRepository(
+          localDatabase: _localDatabase,
+          supabaseService: _supabase,
+        );
+    _authSubscription = _supabase.authStateChanges.listen(_handleAuthStateChange);
     _bootstrap();
   }
 
-  final ApiService _api;
+  final SupabaseService _supabase;
+  final LocalDatabaseService _localDatabase;
+  late final TaskRepository _taskRepository;
   final NotificationService _notifications;
   final SmartWidgetService _widgets;
   final AuthService _auth;
-  final OfflineTaskRepository _offline;
   final ConnectivityService _connectivity;
+  late final SyncManager _syncManager;
 
   StreamSubscription<AuthState>? _authSubscription;
   StreamSubscription<bool>? _connectivitySubscription;
@@ -54,6 +64,7 @@ class TodoAppController extends ChangeNotifier {
   bool _isOnline = true;
   bool _isSyncing = false;
   String? _error;
+  TaskFilterTab _activeTab = TaskFilterTab.today;
 
   static const List<AssistantMessage> _introThread = [
     AssistantMessage(
@@ -77,8 +88,20 @@ class TodoAppController extends ChangeNotifier {
   bool get isAuthenticated => _profile != null || _auth.isLoggedIn;
   bool get isOnline => _isOnline;
   bool get isSyncing => _isSyncing;
-  bool get hasPendingSync => _offline.hasPendingSync;
+  bool get hasPendingSync => _taskRepository.hasPendingOperations;
   String? get error => _error;
+  TaskFilterTab get activeTab => _activeTab;
+  List<TaskItem> get activeTabTasks =>
+      List.unmodifiable(_filterTasksByTab(_tasks, _activeTab));
+  double get activeTabCompletionRate => _tabCompletionRate(_activeTab);
+
+  void setActiveTab(TaskFilterTab tab) {
+    if (_activeTab == tab) {
+      return;
+    }
+    _activeTab = tab;
+    notifyListeners();
+  }
 
   List<TaskAttachment> attachmentsForTask(String taskId) =>
       List.unmodifiable(_attachmentsByTaskId[taskId] ?? const []);
@@ -159,9 +182,31 @@ class TodoAppController extends ChangeNotifier {
 
     try {
       await _auth.initialize();
-      await _offline.init();
+      await _localDatabase.init();
+      await _taskRepository.init();
       await _connectivity.initialize();
       _isOnline = _connectivity.isOnline;
+      _syncManager = SyncManager(
+        repository: _taskRepository,
+        connectivity: _connectivity,
+        onSyncStart: () {
+          _isSyncing = true;
+          notifyListeners();
+        },
+        onSyncComplete: (synced) async {
+          _isSyncing = false;
+          if (synced) {
+            _tasks = _sortTasks(_taskRepository.cachedTasks);
+            notifyListeners();
+          }
+        },
+        onSyncError: (error) {
+          _isSyncing = false;
+          _error = _friendlyError(error);
+          notifyListeners();
+        },
+      );
+      _syncManager.start();
       _connectivitySubscription =
           _connectivity.onStatusChange.listen(_handleConnectivityChange);
 
@@ -176,7 +221,6 @@ class TodoAppController extends ChangeNotifier {
       if (!hasSession) {
         await _clearPlatformState();
       } else if (_isOnline) {
-        await _syncPendingTasks();
         await _syncSessionData();
       } else {
         await _loadOfflineCache();
@@ -217,34 +261,30 @@ class TodoAppController extends ChangeNotifier {
   }
 
   Future<void> _loadSessionData() async {
-    final profile = await _api.getProfile();
-    final tasks = await _api.getTasks();
-    final messages = await _api.getAssistantMessages();
+    final profile = await _supabase.getProfile();
+    final messages = await _supabase.getAssistantMessages();
     Map<String, List<TaskAttachment>> attachmentsByTaskId = const {};
 
     try {
-      final attachments = await _api.getTaskAttachments();
+      final attachments = await _supabase.getTaskAttachments();
       attachmentsByTaskId = _groupAttachmentsByTask(attachments);
     } catch (_) {
       attachmentsByTaskId = const {};
     }
 
+    await _taskRepository.cacheProfile(profile);
+    await _taskRepository.refreshRemoteTasks();
+
     _profile = profile;
-    _tasks = _sortTasks([
-      ..._offline.getLocalDrafts(),
-      ...tasks,
-    ]);
+    _tasks = _sortTasks(_taskRepository.cachedTasks);
     _templates = defaultTaskTemplates;
     _attachmentsByTaskId = attachmentsByTaskId;
     _assistantMessages = messages.isEmpty ? _introThread : messages;
-
-    await _offline.cacheServerTasks(tasks);
-    await _offline.cacheProfile(profile);
   }
 
   Future<void> _loadOfflineCache() async {
-    _profile = _offline.getCachedProfile();
-    _tasks = _sortTasks(_offline.getCachedTasks());
+    _profile = _taskRepository.cachedProfile;
+    _tasks = _sortTasks(_taskRepository.cachedTasks);
     _templates = defaultTaskTemplates;
     _attachmentsByTaskId = const {};
     _assistantMessages = _assistantMessages.isEmpty
@@ -338,28 +378,10 @@ class TodoAppController extends ChangeNotifier {
   }
 
   Future<void> _syncPendingTasks() async {
-    if (!_isOnline || !_auth.isLoggedIn || !_offline.hasPendingSync) {
+    if (!_isOnline) {
       return;
     }
-    if (_isSyncing) {
-      return;
-    }
-
-    _isSyncing = true;
-    notifyListeners();
-
-    try {
-      final synced = await _offline.syncPendingTasks(_api);
-      if (synced.isNotEmpty) {
-        await _performSessionDataSync(
-          setLoading: false,
-          rethrowOnError: false,
-        );
-      }
-    } finally {
-      _isSyncing = false;
-      notifyListeners();
-    }
+    await _syncManager.syncNow();
   }
 
   void _clearSessionState({bool notify = true}) {
@@ -393,6 +415,7 @@ class TodoAppController extends ChangeNotifier {
       return;
     }
 
+    await _syncManager.syncNow();
     await _syncSessionData(setLoading: true);
   }
 
@@ -418,39 +441,21 @@ class TodoAppController extends ChangeNotifier {
   Future<void> unlockPremium() => setPremium(true);
 
   Future<void> toggleTask(String taskId) async {
-    final index = _tasks.indexWhere((task) => task.id == taskId);
-    if (index == -1) {
-      return;
-    }
-
     _error = null;
-    final original = _tasks[index];
-    final updatedTask = original.copyWith(
-      completed: !original.completed,
-      completedAt: !original.completed ? DateTime.now() : null,
-      updatedAt: DateTime.now(),
-    );
-
-    _tasks = [
-      for (var i = 0; i < _tasks.length; i++)
-        if (i == index) updatedTask else _tasks[i],
-    ];
-    _tasks = _sortTasks(_tasks);
-    notifyListeners();
-    unawaited(_syncPlatformState());
-
     try {
-      await _api.updateTask(taskId, {
-        'completed': updatedTask.completed,
-        'completedAt': updatedTask.completedAt?.toIso8601String(),
-      });
-      await _syncPlatformState();
+      await _taskRepository.toggleTaskCompletion(taskId);
+      _tasks = _sortTasks(_taskRepository.cachedTasks);
+      notifyListeners();
+      unawaited(_syncPlatformState());
+
+      if (_isOnline) {
+        await _syncManager.syncNow();
+        _tasks = _sortTasks(_taskRepository.cachedTasks);
+        notifyListeners();
+        await _syncPlatformState();
+      }
     } catch (error) {
-      _tasks = [
-        for (var i = 0; i < _tasks.length; i++)
-          if (i == index) original else _tasks[i],
-      ];
-      _tasks = _sortTasks(_tasks);
+      _tasks = _sortTasks(_taskRepository.cachedTasks);
       _error = _friendlyError(error);
       notifyListeners();
       await _syncPlatformState();
@@ -472,7 +477,7 @@ class TodoAppController extends ChangeNotifier {
     try {
       _error = null;
       if (!_isOnline) {
-        final localTask = await _offline.createLocalTask(
+        await _taskRepository.addTask(
           title: title,
           description: description,
           dueDate: dueDate,
@@ -483,52 +488,51 @@ class TodoAppController extends ChangeNotifier {
           repeat: repeat,
           subtasks: subtasks,
         );
-        _tasks = _sortTasks([localTask, ..._tasks]);
+        _tasks = _sortTasks(_taskRepository.cachedTasks);
         if (attachments.isNotEmpty) {
           _error =
-              'Attachments will upload when you are back online. Saved task locally.';
+              'Attachments will upload once you are back online. Saved task locally.';
         }
-        notifyListeners();
-        await _syncPlatformState();
-        return true;
-      } else {
-        final newTask = await _api.createTask({
-          'title': title.trim(),
-          'description': description.trim(),
-          'dueDate': dueDate.toIso8601String(),
-          'dueTime': _formatTime(dueTime),
-          'priority': priority.apiValue,
-          'category': category.apiValue,
-          'reminder': reminder,
-          'repeat': repeat,
-          'subtasks': subtasks,
-          'completedSubtasks': 0,
-        });
-        _tasks = _sortTasks([newTask, ..._tasks]);
-        if (attachments.isNotEmpty) {
-          try {
-            final uploadedAttachments = await _api.uploadTaskAttachments(
-              newTask.id,
-              attachments,
-            );
-            _attachmentsByTaskId = _mergeTaskAttachments(
-              _attachmentsByTaskId,
-              newTask.id,
-              uploadedAttachments,
-            );
-          } catch (error) {
-            _error =
-                'Task created, but attachments could not be uploaded. ${_friendlyError(error)}';
-          }
-        }
-        final remoteTasks = _tasks
-            .where((task) => !task.id.startsWith('local-'))
-            .toList(growable: false);
-        await _offline.cacheServerTasks(remoteTasks);
         notifyListeners();
         await _syncPlatformState();
         return true;
       }
+
+      final createdTask = await _supabase.createTask({
+        'title': title.trim(),
+        'description': description.trim(),
+        'dueDate': dueDate.toIso8601String(),
+        'dueTime': _formatTime(dueTime),
+        'priority': priority.apiValue,
+        'category': category.apiValue,
+        'reminder': reminder,
+        'repeat': repeat,
+        'subtasks': subtasks,
+        'completedSubtasks': 0,
+      });
+      await _taskRepository.refreshRemoteTasks();
+      _tasks = _sortTasks(_taskRepository.cachedTasks);
+
+      if (attachments.isNotEmpty) {
+        try {
+          final uploadedAttachments = await _taskRepository.uploadAttachments(
+            createdTask.id,
+            attachments,
+          );
+          _attachmentsByTaskId = _mergeTaskAttachments(
+            _attachmentsByTaskId,
+            createdTask.id,
+            uploadedAttachments,
+          );
+        } catch (error) {
+          _error =
+              'Task created, but attachments could not be uploaded. ${_friendlyError(error)}';
+        }
+      }
+
+      notifyListeners();
+      await _syncPlatformState();
+      return true;
     } catch (error) {
       _error = _friendlyError(error);
       notifyListeners();
@@ -539,7 +543,7 @@ class TodoAppController extends ChangeNotifier {
   Future<void> updateProfile(UserProfile updatedProfile) async {
     try {
       _error = null;
-      await _api.updateProfile(updatedProfile);
+      await _supabase.updateProfile(updatedProfile);
       _profile = updatedProfile;
       notifyListeners();
       await _syncPlatformState();
@@ -573,7 +577,7 @@ class TodoAppController extends ChangeNotifier {
     _error = null;
 
     try {
-      final result = await _api.register(userData);
+      final result = await _supabase.register(userData);
       if (result == AuthActionResult.success) {
         await _auth.restoreSession();
         await _syncSessionData(rethrowOnError: true);
@@ -594,7 +598,7 @@ class TodoAppController extends ChangeNotifier {
     _error = null;
     try {
       await _auth.logout();
-      await _offline.clear();
+      await _localDatabase.clear();
       _clearSessionState();
     } catch (error) {
       _error = _friendlyError(error);
@@ -606,9 +610,9 @@ class TodoAppController extends ChangeNotifier {
   Future<bool> deleteAccount() async {
     try {
       _error = null;
-      await _api.deleteAccount();
+      await _supabase.deleteAccount();
       await _auth.logout();
-      await _offline.clear();
+      await _localDatabase.clear();
       _clearSessionState();
       return true;
     } catch (error) {
@@ -635,7 +639,7 @@ class TodoAppController extends ChangeNotifier {
     notifyListeners();
 
     try {
-      final assistantMessage = await _api.sendAssistantMessage(trimmed);
+      final assistantMessage = await _supabase.sendAssistantMessage(trimmed);
       _assistantMessages = [..._assistantMessages, assistantMessage];
       notifyListeners();
     } catch (error) {
@@ -687,7 +691,7 @@ class TodoAppController extends ChangeNotifier {
     notifyListeners();
 
     try {
-      await _api.updateAssistantMessage(messageId, updated.toJson());
+      await _supabase.updateAssistantMessage(messageId, updated.toJson());
     } catch (_) {
       // Keep local confirmation even if sync is unavailable.
     }
@@ -698,7 +702,7 @@ class TodoAppController extends ChangeNotifier {
     notifyListeners();
 
     try {
-      await _api.resetAssistantMessages();
+      await _supabase.resetAssistantMessages();
     } catch (_) {
       // Local reset is enough to keep the UI usable.
     }
@@ -720,31 +724,26 @@ class TodoAppController extends ChangeNotifier {
   }
 
   Future<void> deleteTask(String taskId) async {
-    final previousTasks = _tasks;
-    final previousAttachments = _attachmentsByTaskId;
-    final updatedTasks = previousTasks
-        .where((task) => task.id != taskId)
-        .toList(growable: false);
-    if (updatedTasks.length == previousTasks.length) {
-      return;
-    }
-
     _error = null;
-    _tasks = updatedTasks;
-    _attachmentsByTaskId = Map<String, List<TaskAttachment>>.from(
-      _attachmentsByTaskId,
-    )..remove(taskId);
-    notifyListeners();
-    unawaited(_syncPlatformState());
-
     try {
-      await _api.deleteTask(taskId);
+      await _taskRepository.deleteTask(taskId);
       await _notifications.cancelTaskReminder(taskId);
-      await _syncPlatformState();
+      _tasks = _sortTasks(_taskRepository.cachedTasks);
+      _attachmentsByTaskId = Map<String, List<TaskAttachment>>.from(
+        _attachmentsByTaskId,
+      )..remove(taskId);
+      notifyListeners();
+      unawaited(_syncPlatformState());
+
+      if (_isOnline) {
+        await _syncManager.syncNow();
+        _tasks = _sortTasks(_taskRepository.cachedTasks);
+        notifyListeners();
+        await _syncPlatformState();
+      }
     } catch (error) {
-      _tasks = previousTasks;
-      _attachmentsByTaskId = previousAttachments;
       _error = _friendlyError(error);
+      _tasks = _sortTasks(_taskRepository.cachedTasks);
       notifyListeners();
       await _syncPlatformState();
     }
@@ -772,6 +771,42 @@ class TodoAppController extends ChangeNotifier {
       return left.dueDate.compareTo(right.dueDate);
     });
     return sorted;
+  }
+
+  List<TaskItem> _filterTasksByTab(
+    List<TaskItem> tasks,
+    TaskFilterTab tab,
+  ) {
+    final today = _dateOnly(DateTime.now());
+    switch (tab) {
+      case TaskFilterTab.today:
+        return tasks
+            .where((task) => _dateOnly(task.dueDate) == today)
+            .toList(growable: false);
+      case TaskFilterTab.upcoming:
+        return tasks
+            .where((task) => _dateOnly(task.dueDate).isAfter(today))
+            .toList(growable: false);
+      case TaskFilterTab.completed:
+        return tasks.where((task) => task.completed).toList(growable: false);
+      case TaskFilterTab.history:
+        return tasks
+            .where((task) => _dateOnly(task.dueDate).isBefore(today) && !task.completed)
+            .toList(growable: false);
+    }
+  }
+
+  double _tabCompletionRate(TaskFilterTab tab) {
+    final filtered = _filterTasksByTab(_tasks, tab);
+    if (filtered.isEmpty) {
+      return 0;
+    }
+    final completed = filtered.where((task) => task.completed).length;
+    return completed / filtered.length;
+  }
+
+  DateTime _dateOnly(DateTime date) {
+    return DateTime(date.year, date.month, date.day);
   }
 
   Map<String, List<TaskAttachment>> _groupAttachmentsByTask(
@@ -906,7 +941,7 @@ class TodoAppController extends ChangeNotifier {
   }
 
   String _friendlyError(Object error) {
-    return friendlyErrorMessage(error, baseUrl: ApiService.baseUrl);
+  return friendlyErrorMessage(error, baseUrl: SupabaseService.baseUrl);
   }
 
   Future<void> _syncPlatformState() async {
@@ -932,6 +967,7 @@ class TodoAppController extends ChangeNotifier {
   void dispose() {
     _authSubscription?.cancel();
     _connectivitySubscription?.cancel();
+    _syncManager.dispose();
     _connectivity.dispose();
     super.dispose();
   }
@@ -1099,4 +1135,21 @@ bool _looksLikeConnectivityIssue(String normalizedMessage) {
 
 String _formatTime(TimeOfDay time) {
   return '${time.hour.toString().padLeft(2, '0')}:${time.minute.toString().padLeft(2, '0')}';
+}
+
+enum TaskFilterTab { today, upcoming, completed, history }
+
+extension TaskFilterTabX on TaskFilterTab {
+  String get label {
+    switch (this) {
+      case TaskFilterTab.today:
+        return 'Today';
+      case TaskFilterTab.upcoming:
+        return 'Upcoming';
+      case TaskFilterTab.completed:
+        return 'Completed';
+      case TaskFilterTab.history:
+        return 'History';
+    }
+  }
 }

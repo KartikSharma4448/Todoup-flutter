@@ -1,4 +1,4 @@
-create extension if not exists pgcrypto;
+444444create extension if not exists pgcrypto;
 
 create table if not exists public.users (
   id uuid primary key references auth.users(id) on delete cascade,
