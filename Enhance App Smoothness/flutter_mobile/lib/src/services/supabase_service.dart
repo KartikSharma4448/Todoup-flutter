@@ -144,6 +144,26 @@ class SupabaseService {
     }
   }
 
+  Future<void> replaceCloudTasks(List<TaskItem> tasks) async {
+    final user = _requireUser();
+
+    try {
+      await _deleteAllStoredAttachmentsForUser(user.id);
+      await _client.from('tasks').delete().eq('user_id', user.id);
+
+      if (tasks.isEmpty) {
+        return;
+      }
+
+      final payload = tasks
+          .map((task) => _taskInsertPayload(task.toPayload(), user.id))
+          .toList(growable: false);
+      await _client.from('tasks').insert(payload);
+    } on PostgrestException catch (error) {
+      throw Exception(error.message);
+    }
+  }
+
   Future<List<TaskAttachment>> getTaskAttachments() async {
     final user = _requireUser();
 
@@ -439,8 +459,7 @@ class SupabaseService {
   }
 
   TaskItem _taskFromRecord(Map<String, dynamic> row) {
-    final dueDate =
-        DateTime.tryParse(row['due_date']?.toString() ?? '') ?? DateTime.now();
+    final dueDate = _parseCloudDate(row['due_date']) ?? DateTime.now();
     final dueTimeValue = row['due_time']?.toString();
     final subtasks = _readSubtasks(row['subtasks']);
     final completedSubtasks =
@@ -458,7 +477,7 @@ class SupabaseService {
       serverId: serverId,
       title: row['title']?.toString() ?? '',
       completed: completed,
-      dueDate: DateTime(dueDate.year, dueDate.month, dueDate.day),
+      dueDate: dueDate,
       dueLabel: _relativeDueLabel(dueDate),
       priority: taskPriorityFromApi(row['priority']?.toString()),
       category: taskCategoryFromApi(row['category']?.toString()),
@@ -482,13 +501,14 @@ class SupabaseService {
     Map<String, dynamic> taskData,
     String userId,
   ) {
+    final dueDate = _coerceDateOnly(taskData['dueDate']);
     return {
       'user_id': userId,
       'title': taskData['title']?.toString().trim() ?? '',
       'description': taskData['description']?.toString().trim(),
       'priority': taskData['priority']?.toString() ?? 'medium',
       'status': taskData['completed'] == true ? 'completed' : 'pending',
-      'due_date': taskData['dueDate']?.toString(),
+      'due_date': dueDate?.toIso8601String(),
       'notes': taskData['description']?.toString().trim(),
       'recurring': (taskData['repeat']?.toString() ?? 'None') != 'None',
       'tags': const [],
@@ -523,7 +543,7 @@ class SupabaseService {
       payload['priority'] = taskData['priority']?.toString() ?? 'medium';
     }
     if (taskData.containsKey('dueDate')) {
-      payload['due_date'] = taskData['dueDate']?.toString();
+      payload['due_date'] = _coerceDateOnly(taskData['dueDate'])?.toIso8601String();
     }
     if (taskData.containsKey('category')) {
       payload['category'] = taskData['category']?.toString() ?? 'personal';
@@ -769,6 +789,29 @@ class SupabaseService {
     }
   }
 
+  Future<void> _deleteAllStoredAttachmentsForUser(String userId) async {
+    final rows = await _client
+        .from('task_attachments')
+        .select('storage_path')
+        .eq('user_id', userId);
+
+    final storagePaths = (rows as List<dynamic>)
+        .map((item) => Map<String, dynamic>.from(item as Map))
+        .map((item) => item['storage_path']?.toString() ?? '')
+        .where((path) => path.isNotEmpty)
+        .toList(growable: false);
+
+    try {
+      if (storagePaths.isNotEmpty) {
+        await _client.storage.from(_attachmentBucket).remove(storagePaths);
+      }
+    } on StorageException catch (error) {
+      throw Exception(error.message);
+    }
+
+    await _client.from('task_attachments').delete().eq('user_id', userId);
+  }
+
   String _sanitizeFileName(String name) {
     final sanitized = name.replaceAll(RegExp(r'[^A-Za-z0-9._-]'), '_');
     return sanitized.isEmpty ? 'attachment.bin' : sanitized;
@@ -787,6 +830,33 @@ DateTime? _parseDateTime(Object? value) {
     return null;
   }
   return DateTime.tryParse(value.toString());
+}
+
+DateTime? _parseCloudDate(Object? value) {
+  final parsed = _parseDateTime(value);
+  if (parsed == null) {
+    return null;
+  }
+
+  final utcDate = parsed.isUtc ? parsed : parsed.toUtc();
+  return DateTime(utcDate.year, utcDate.month, utcDate.day);
+}
+
+DateTime? _coerceDateOnly(Object? value) {
+  if (value == null) {
+    return null;
+  }
+
+  if (value is DateTime) {
+    return DateTime.utc(value.year, value.month, value.day);
+  }
+
+  final parsed = DateTime.tryParse(value.toString());
+  if (parsed == null) {
+    return null;
+  }
+
+  return DateTime.utc(parsed.year, parsed.month, parsed.day);
 }
 
 TimeOfDay? _parseTimeOfDay(String? value) {
@@ -830,7 +900,11 @@ String _relativeDueLabel(DateTime date) {
   if (difference == 1) {
     return 'Tomorrow';
   }
+  if (difference == -1) {
+    return 'Yesterday';
+  }
 
+  const weekdays = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
   const months = [
     'Jan',
     'Feb',
@@ -845,5 +919,10 @@ String _relativeDueLabel(DateTime date) {
     'Nov',
     'Dec',
   ];
-  return '${months[date.month - 1]} ${date.day}';
+  final base =
+      '${weekdays[date.weekday - 1]}, ${months[date.month - 1]} ${date.day}';
+  if (date.year == now.year) {
+    return base;
+  }
+  return '$base, ${date.year}';
 }

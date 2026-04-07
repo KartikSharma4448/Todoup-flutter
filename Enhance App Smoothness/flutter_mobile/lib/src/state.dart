@@ -10,7 +10,6 @@ import 'connectivity_service.dart';
 import 'models.dart';
 import 'notification_service.dart';
 import 'services/local_database_service.dart';
-import 'services/sync_manager.dart';
 import 'services/supabase_service.dart';
 import 'services/task_repository.dart';
 import 'smart_widget_service.dart';
@@ -47,7 +46,6 @@ class TodoAppController extends ChangeNotifier {
   final SmartWidgetService _widgets;
   final AuthService _auth;
   final ConnectivityService _connectivity;
-  late final SyncManager _syncManager;
 
   StreamSubscription<AuthState>? _authSubscription;
   StreamSubscription<bool>? _connectivitySubscription;
@@ -63,6 +61,8 @@ class TodoAppController extends ChangeNotifier {
   bool _isInitialized = false;
   bool _isOnline = true;
   bool _isSyncing = false;
+  DateTime? _lastCloudBackupAt;
+  ReminderSystemReport? _lastReminderReport;
   String? _error;
   TaskFilterTab _activeTab = TaskFilterTab.today;
 
@@ -88,7 +88,9 @@ class TodoAppController extends ChangeNotifier {
   bool get isAuthenticated => _profile != null || _auth.isLoggedIn;
   bool get isOnline => _isOnline;
   bool get isSyncing => _isSyncing;
-  bool get hasPendingSync => _taskRepository.hasPendingOperations;
+  bool get hasPendingSync => false;
+  DateTime? get lastCloudBackupAt => _lastCloudBackupAt;
+  ReminderSystemReport? get lastReminderReport => _lastReminderReport;
   String? get error => _error;
   TaskFilterTab get activeTab => _activeTab;
   List<TaskItem> get activeTabTasks =>
@@ -186,44 +188,25 @@ class TodoAppController extends ChangeNotifier {
       await _taskRepository.init();
       await _connectivity.initialize();
       _isOnline = _connectivity.isOnline;
-      _syncManager = SyncManager(
-        repository: _taskRepository,
-        connectivity: _connectivity,
-        onSyncStart: () {
-          _isSyncing = true;
-          notifyListeners();
-        },
-        onSyncComplete: (synced) async {
-          _isSyncing = false;
-          if (synced) {
-            _tasks = _sortTasks(_taskRepository.cachedTasks);
-            notifyListeners();
-          }
-        },
-        onSyncError: (error) {
-          _isSyncing = false;
-          _error = _friendlyError(error);
-          notifyListeners();
-        },
-      );
-      _syncManager.start();
       _connectivitySubscription =
           _connectivity.onStatusChange.listen(_handleConnectivityChange);
 
       await _loadSettings();
       await _notifications.initialize();
       await _widgets.initialize();
+      await _loadOfflineCache();
 
       final hasSession = await _auth.restoreSession(
         tryServerRecovery: _isOnline,
       );
 
       if (!hasSession) {
+        _clearSessionState(notify: false);
         await _clearPlatformState();
       } else if (_isOnline) {
         await _syncSessionData();
       } else {
-        await _loadOfflineCache();
+        await _syncPlatformState();
       }
     } catch (error) {
       _error = _friendlyError(error);
@@ -242,6 +225,8 @@ class TodoAppController extends ChangeNotifier {
         notificationsEnabled: _prefs?.getBool('notifications_enabled') ?? true,
         premium: _prefs?.getBool('premium_unlocked') ?? false,
       );
+      final backupAt = _prefs?.getString('last_cloud_backup_at');
+      _lastCloudBackupAt = backupAt == null ? null : DateTime.tryParse(backupAt);
     } catch (_) {
       _prefs = null;
     }
@@ -255,6 +240,14 @@ class TodoAppController extends ChangeNotifier {
         _settings.notificationsEnabled,
       );
       await _prefs?.setBool('premium_unlocked', _settings.premium);
+      if (_lastCloudBackupAt == null) {
+        await _prefs?.remove('last_cloud_backup_at');
+      } else {
+        await _prefs?.setString(
+          'last_cloud_backup_at',
+          _lastCloudBackupAt!.toIso8601String(),
+        );
+      }
     } catch (_) {
       // Preferences are a best-effort convenience.
     }
@@ -262,31 +255,36 @@ class TodoAppController extends ChangeNotifier {
 
   Future<void> _loadSessionData() async {
     final profile = await _supabase.getProfile();
-    final messages = await _supabase.getAssistantMessages();
-    Map<String, List<TaskAttachment>> attachmentsByTaskId = const {};
+    List<AssistantMessage> messages = const [];
 
     try {
-      final attachments = await _supabase.getTaskAttachments();
-      attachmentsByTaskId = _groupAttachmentsByTask(attachments);
+      messages = await _supabase.getAssistantMessages();
     } catch (_) {
-      attachmentsByTaskId = const {};
+      messages = const [];
     }
 
     await _taskRepository.cacheProfile(profile);
-    await _taskRepository.refreshRemoteTasks();
 
     _profile = profile;
     _tasks = _sortTasks(_taskRepository.cachedTasks);
     _templates = defaultTaskTemplates;
-    _attachmentsByTaskId = attachmentsByTaskId;
-    _assistantMessages = messages.isEmpty ? _introThread : messages;
+    _attachmentsByTaskId = _groupAttachmentsByTask(
+      _taskRepository.cachedAttachments,
+    );
+    if (messages.isNotEmpty) {
+      _assistantMessages = messages;
+    } else if (_assistantMessages.isEmpty) {
+      _assistantMessages = _introThread;
+    }
   }
 
   Future<void> _loadOfflineCache() async {
     _profile = _taskRepository.cachedProfile;
     _tasks = _sortTasks(_taskRepository.cachedTasks);
     _templates = defaultTaskTemplates;
-    _attachmentsByTaskId = const {};
+    _attachmentsByTaskId = _groupAttachmentsByTask(
+      _taskRepository.cachedAttachments,
+    );
     _assistantMessages = _assistantMessages.isEmpty
         ? _introThread
         : _assistantMessages;
@@ -373,15 +371,7 @@ class TodoAppController extends ChangeNotifier {
     }
 
     await _auth.restoreSession(tryServerRecovery: true);
-    await _syncPendingTasks();
     await _syncSessionData();
-  }
-
-  Future<void> _syncPendingTasks() async {
-    if (!_isOnline) {
-      return;
-    }
-    await _syncManager.syncNow();
   }
 
   void _clearSessionState({bool notify = true}) {
@@ -389,6 +379,8 @@ class TodoAppController extends ChangeNotifier {
     _tasks = const [];
     _attachmentsByTaskId = const {};
     _assistantMessages = _introThread;
+    _isSyncing = false;
+    _lastReminderReport = null;
     _error = null;
     unawaited(_clearPlatformState());
     if (notify) {
@@ -415,7 +407,7 @@ class TodoAppController extends ChangeNotifier {
       return;
     }
 
-    await _syncManager.syncNow();
+    await _loadOfflineCache();
     await _syncSessionData(setLoading: true);
   }
 
@@ -446,14 +438,7 @@ class TodoAppController extends ChangeNotifier {
       await _taskRepository.toggleTaskCompletion(taskId);
       _tasks = _sortTasks(_taskRepository.cachedTasks);
       notifyListeners();
-      unawaited(_syncPlatformState());
-
-      if (_isOnline) {
-        await _syncManager.syncNow();
-        _tasks = _sortTasks(_taskRepository.cachedTasks);
-        notifyListeners();
-        await _syncPlatformState();
-      }
+      await _syncPlatformState();
     } catch (error) {
       _tasks = _sortTasks(_taskRepository.cachedTasks);
       _error = _friendlyError(error);
@@ -476,57 +461,34 @@ class TodoAppController extends ChangeNotifier {
   }) async {
     try {
       _error = null;
-      if (!_isOnline) {
-        await _taskRepository.addTask(
-          title: title,
-          description: description,
-          dueDate: dueDate,
-          dueTime: dueTime,
-          priority: priority,
-          category: category,
-          reminder: reminder,
-          repeat: repeat,
-          subtasks: subtasks,
-        );
-        _tasks = _sortTasks(_taskRepository.cachedTasks);
-        if (attachments.isNotEmpty) {
-          _error =
-              'Attachments will upload once you are back online. Saved task locally.';
-        }
-        notifyListeners();
-        await _syncPlatformState();
-        return true;
-      }
-
-      final createdTask = await _supabase.createTask({
-        'title': title.trim(),
-        'description': description.trim(),
-        'dueDate': dueDate.toIso8601String(),
-        'dueTime': _formatTime(dueTime),
-        'priority': priority.apiValue,
-        'category': category.apiValue,
-        'reminder': reminder,
-        'repeat': repeat,
-        'subtasks': subtasks,
-        'completedSubtasks': 0,
-      });
-      await _taskRepository.refreshRemoteTasks();
+      final createdTask = await _taskRepository.addTask(
+        title: title,
+        description: description,
+        dueDate: dueDate,
+        dueTime: dueTime,
+        priority: priority,
+        category: category,
+        reminder: reminder,
+        repeat: repeat,
+        subtasks: subtasks,
+      );
       _tasks = _sortTasks(_taskRepository.cachedTasks);
 
       if (attachments.isNotEmpty) {
         try {
-          final uploadedAttachments = await _taskRepository.uploadAttachments(
+          final localAttachments = await _taskRepository.uploadAttachments(
             createdTask.id,
             attachments,
           );
+          await _taskRepository.saveLocalAttachments(localAttachments);
           _attachmentsByTaskId = _mergeTaskAttachments(
             _attachmentsByTaskId,
             createdTask.id,
-            uploadedAttachments,
+            localAttachments,
           );
         } catch (error) {
           _error =
-              'Task created, but attachments could not be uploaded. ${_friendlyError(error)}';
+              'Task saved, but attachments could not be stored locally. ${_friendlyError(error)}';
         }
       }
 
@@ -544,6 +506,7 @@ class TodoAppController extends ChangeNotifier {
     try {
       _error = null;
       await _supabase.updateProfile(updatedProfile);
+      await _taskRepository.cacheProfile(updatedProfile);
       _profile = updatedProfile;
       notifyListeners();
       await _syncPlatformState();
@@ -599,6 +562,8 @@ class TodoAppController extends ChangeNotifier {
     try {
       await _auth.logout();
       await _localDatabase.clear();
+      _lastCloudBackupAt = null;
+      await _persistSettings();
       _clearSessionState();
     } catch (error) {
       _error = _friendlyError(error);
@@ -613,6 +578,8 @@ class TodoAppController extends ChangeNotifier {
       await _supabase.deleteAccount();
       await _auth.logout();
       await _localDatabase.clear();
+      _lastCloudBackupAt = null;
+      await _persistSettings();
       _clearSessionState();
       return true;
     } catch (error) {
@@ -733,20 +700,89 @@ class TodoAppController extends ChangeNotifier {
         _attachmentsByTaskId,
       )..remove(taskId);
       notifyListeners();
-      unawaited(_syncPlatformState());
-
-      if (_isOnline) {
-        await _syncManager.syncNow();
-        _tasks = _sortTasks(_taskRepository.cachedTasks);
-        notifyListeners();
-        await _syncPlatformState();
-      }
+      await _syncPlatformState();
     } catch (error) {
       _error = _friendlyError(error);
       _tasks = _sortTasks(_taskRepository.cachedTasks);
       notifyListeners();
       await _syncPlatformState();
     }
+  }
+
+  Future<bool> uploadTasksToCloud() async {
+    if (!_auth.isLoggedIn) {
+      _error = 'Sign in to upload your cloud backup.';
+      notifyListeners();
+      return false;
+    }
+    if (!_isOnline) {
+      _error = 'Connect to the internet to upload your cloud backup.';
+      notifyListeners();
+      return false;
+    }
+
+    _error = null;
+    _isSyncing = true;
+    notifyListeners();
+
+    try {
+      await _taskRepository.uploadTasksBackup();
+      _lastCloudBackupAt = DateTime.now();
+      await _persistSettings();
+      return true;
+    } catch (error) {
+      _error = _friendlyError(error);
+      return false;
+    } finally {
+      _isSyncing = false;
+      notifyListeners();
+    }
+  }
+
+  Future<int?> restoreTasksFromCloud() async {
+    if (!_auth.isLoggedIn) {
+      _error = 'Sign in to restore your cloud backup.';
+      notifyListeners();
+      return null;
+    }
+    if (!_isOnline) {
+      _error = 'Connect to the internet to restore tasks from the cloud.';
+      notifyListeners();
+      return null;
+    }
+
+    _error = null;
+    _isSyncing = true;
+    notifyListeners();
+
+    try {
+      final restoredTasks = await _taskRepository.restoreTasksBackup();
+      await _taskRepository.replaceLocalSnapshot(tasks: restoredTasks);
+      _tasks = _sortTasks(restoredTasks);
+      _attachmentsByTaskId = const {};
+      await _syncPlatformState();
+      return restoredTasks.length;
+    } catch (error) {
+      _error = _friendlyError(error);
+      return null;
+    } finally {
+      _isSyncing = false;
+      notifyListeners();
+    }
+  }
+
+  Future<ReminderSystemReport> runReminderSystemCheck({
+    bool scheduleTestReminder = true,
+  }) async {
+    _error = null;
+    final report = await _notifications.runReminderHealthCheck(
+      _tasks,
+      enabled: _settings.notificationsEnabled,
+      scheduleTestReminder: scheduleTestReminder,
+    );
+    _lastReminderReport = report;
+    notifyListeners();
+    return report;
   }
 
   Future<void> refreshSmartWidget() => _syncPlatformState();
@@ -967,7 +1003,6 @@ class TodoAppController extends ChangeNotifier {
   void dispose() {
     _authSubscription?.cancel();
     _connectivitySubscription?.cancel();
-    _syncManager.dispose();
     _connectivity.dispose();
     super.dispose();
   }
@@ -1011,20 +1046,11 @@ String formatFullDate(DateTime date) {
     'November',
     'December',
   ];
-  return '${weekdays[date.weekday - 1]}, ${months[date.month - 1]} ${date.day}';
+  return '${weekdays[date.weekday - 1]}, ${months[date.month - 1]} ${date.day}, ${date.year}';
 }
 
-String relativeDueLabel(DateTime date) {
-  final now = DateTime.now();
-  final today = DateTime(now.year, now.month, now.day);
-  final target = DateTime(date.year, date.month, date.day);
-  final difference = target.difference(today).inDays;
-  if (difference == 0) {
-    return 'Today';
-  }
-  if (difference == 1) {
-    return 'Tomorrow';
-  }
+String formatShortCalendarDate(DateTime date) {
+  const weekdays = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
   const months = [
     'Jan',
     'Feb',
@@ -1039,7 +1065,81 @@ String relativeDueLabel(DateTime date) {
     'Nov',
     'Dec',
   ];
-  return '${months[date.month - 1]} ${date.day}';
+  final base =
+      '${weekdays[date.weekday - 1]}, ${months[date.month - 1]} ${date.day}';
+  if (date.year == DateTime.now().year) {
+    return base;
+  }
+  return '$base, ${date.year}';
+}
+
+String relativeDueLabel(DateTime date) {
+  final now = DateTime.now();
+  final today = DateTime(now.year, now.month, now.day);
+  final target = DateTime(date.year, date.month, date.day);
+  final difference = target.difference(today).inDays;
+  if (difference == 0) {
+    return 'Today';
+  }
+  if (difference == 1) {
+    return 'Tomorrow';
+  }
+  if (difference == -1) {
+    return 'Yesterday';
+  }
+  return formatShortCalendarDate(date);
+}
+
+String formatRelativeAndAbsoluteDate(DateTime date) {
+  final relative = relativeDueLabel(date);
+  final absolute = formatShortCalendarDate(date);
+  if (relative == absolute) {
+    return absolute;
+  }
+  return '$relative • $absolute';
+}
+
+String formatTaskScheduleLabel(TaskItem task) {
+  final dateLabel = formatRelativeAndAbsoluteDate(task.dueDate);
+  if (task.dueTime == null) {
+    return dateLabel;
+  }
+  return '$dateLabel • ${formatTimeOfDayLabel(task.dueTime!)}';
+}
+
+bool isTaskOverdue(TaskItem task, {DateTime? now}) {
+  if (task.completed) {
+    return false;
+  }
+
+  final current = now ?? DateTime.now();
+  final dueDate = DateTime(task.dueDate.year, task.dueDate.month, task.dueDate.day);
+  if (task.dueTime == null) {
+    return dueDate.isBefore(DateTime(current.year, current.month, current.day));
+  }
+
+  final dueAt = DateTime(
+    task.dueDate.year,
+    task.dueDate.month,
+    task.dueDate.day,
+    task.dueTime!.hour,
+    task.dueTime!.minute,
+  );
+  return dueAt.isBefore(current);
+}
+
+String greetingForNow({DateTime? now, String? name}) {
+  final current = now ?? DateTime.now();
+  final salutation = switch (current.hour) {
+    < 12 => 'Good morning',
+    < 17 => 'Good afternoon',
+    _ => 'Good evening',
+  };
+  final trimmedName = name?.trim() ?? '';
+  if (trimmedName.isEmpty) {
+    return salutation;
+  }
+  return '$salutation, ${trimmedName.split(' ').first}';
 }
 
 String formatTimeOfDayLabel(TimeOfDay time) {

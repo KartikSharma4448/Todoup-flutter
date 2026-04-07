@@ -1,0 +1,19 @@
+# Flutter
+.dart_tool/
+build/
+.flutter-plugins
+.flutter-plugins-dependencies
+**/ios/Pods/
+**/ios/Flutter/ephemeral/
+**/android/local.properties
+**/android/.gradle/
+**/windows/flutter/generated_plugin_registrant.*
+**/linux/flutter/generated_plugin_registrant.*
+**/macos/Flutter/ephemeral/
+
+# General
+.DS_Store
+.vscode/
+.idea/
+*.log
+.env*

@@ -27,11 +27,11 @@ class _AppShellState extends State<AppShell> {
 
   @override
   Widget build(BuildContext context) {
-    final pages = [
-      const HomeTab(),
-      const ActivityTab(),
-      const AnalyticsTab(),
-      const ProfileTab(),
+    const pages = [
+      HomeTab(),
+      ActivityTab(),
+      AnalyticsTab(),
+      ProfileTab(),
     ];
 
     return Scaffold(
@@ -110,16 +110,22 @@ class HomeTab extends StatelessWidget {
   Widget build(BuildContext context) {
     final controller = TodoAppScope.of(context);
     final tasks = controller.activeTabTasks;
+    final allOpenTasks = controller.tasks
+        .where((task) => !task.completed)
+        .toList(growable: false);
     final completed = tasks.where((task) => task.completed).length;
     final total = tasks.length;
     final progress = controller.activeTabCompletionRate;
+    final overdueCount = allOpenTasks.where(isTaskOverdue).length;
+    final reminderCount = allOpenTasks.where((task) => task.reminder).length;
+    final nextTask = allOpenTasks.isEmpty ? null : allOpenTasks.first;
     final greetingTitle = total == 0
         ? 'Plan your ${controller.activeTab.label.toLowerCase()} tasks'
-        : 'Good Morning!';
+        : greetingForNow(name: controller.profile.name);
 
     return Stack(
       children: [
-        if (!controller.isOnline || controller.hasPendingSync || controller.isSyncing)
+        if (!controller.isOnline || controller.isSyncing)
           Positioned(
             top: 0,
             left: 0,
@@ -131,7 +137,7 @@ class HomeTab extends StatelessWidget {
                 child: _OfflineBanner(
                   isOnline: controller.isOnline,
                   isSyncing: controller.isSyncing,
-                  hasPending: controller.hasPendingSync,
+                  hasPending: false,
                 ),
               ),
             ),
@@ -222,6 +228,105 @@ class HomeTab extends StatelessWidget {
                           ],
                         ),
                       ),
+                      const SizedBox(height: 14),
+                      Row(
+                        children: [
+                          Expanded(
+                            child: _DashboardStatTile(
+                              icon: Icons.timer_off_rounded,
+                              label: 'Overdue',
+                              value: '$overdueCount',
+                              detail: overdueCount == 0
+                                  ? 'All caught up'
+                                  : 'Needs attention',
+                              tint: const Color(0xFFEF4444),
+                            ),
+                          ),
+                          const SizedBox(width: 12),
+                          Expanded(
+                            child: _DashboardStatTile(
+                              icon: Icons.notifications_active_rounded,
+                              label: 'Reminders',
+                              value: '$reminderCount',
+                              detail: reminderCount == 0
+                                  ? 'Quiet day'
+                                  : 'Ready to alert',
+                              tint: const Color(0xFF0EA5E9),
+                            ),
+                          ),
+                        ],
+                      ),
+                      if (nextTask != null) ...[
+                        const SizedBox(height: 12),
+                        GlassCard(
+                          padding: const EdgeInsets.all(18),
+                          child: Row(
+                            children: [
+                              Container(
+                                width: 46,
+                                height: 46,
+                                decoration: BoxDecoration(
+                                  color: nextTask.category.color.withValues(
+                                    alpha: 0.12,
+                                  ),
+                                  borderRadius: BorderRadius.circular(16),
+                                ),
+                                child: Icon(
+                                  Icons.rocket_launch_rounded,
+                                  color: nextTask.category.color,
+                                ),
+                              ),
+                              const SizedBox(width: 14),
+                              Expanded(
+                                child: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    Text(
+                                      'Next Focus',
+                                      style: Theme.of(context)
+                                          .textTheme
+                                          .bodySmall
+                                          ?.copyWith(
+                                            color: Theme.of(context)
+                                                .textTheme
+                                                .bodyMedium
+                                                ?.color
+                                                ?.withValues(alpha: 0.62),
+                                          ),
+                                    ),
+                                    const SizedBox(height: 4),
+                                    Text(
+                                      nextTask.title,
+                                      maxLines: 1,
+                                      overflow: TextOverflow.ellipsis,
+                                      style: Theme.of(context)
+                                          .textTheme
+                                          .titleMedium
+                                          ?.copyWith(
+                                            fontWeight: FontWeight.w800,
+                                          ),
+                                    ),
+                                    const SizedBox(height: 4),
+                                    Text(
+                                      formatTaskScheduleLabel(nextTask),
+                                      style: Theme.of(context)
+                                          .textTheme
+                                          .bodyMedium
+                                          ?.copyWith(
+                                            color: Theme.of(context)
+                                                .textTheme
+                                                .bodyMedium
+                                                ?.color
+                                                ?.withValues(alpha: 0.68),
+                                          ),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ],
                       const SizedBox(height: 16),
                       _TaskFilterTabs(
                         activeTab: controller.activeTab,
@@ -230,10 +335,10 @@ class HomeTab extends StatelessWidget {
                       if (controller.error != null) ...[
                         const SizedBox(height: 16),
                         _DashboardNoticeCard(
-                          icon: Icons.cloud_off_rounded,
-                          title: 'Sync issue',
+                          icon: Icons.info_outline_rounded,
+                          title: 'Heads up',
                           message: controller.error!,
-                          actionLabel: 'Retry',
+                          actionLabel: 'Refresh',
                           onAction: controller.refreshDashboard,
                         ),
                       ],
@@ -259,7 +364,7 @@ class HomeTab extends StatelessWidget {
                         children: [
                           CircularProgressIndicator(color: AppColors.primary),
                           SizedBox(height: 14),
-                          Text('Syncing your dashboard...'),
+                          Text('Refreshing your dashboard...'),
                         ],
                       ),
                     ),
@@ -409,6 +514,72 @@ class _DashboardNoticeCard extends StatelessWidget {
               onPressed: onAction,
             ),
           ],
+        ],
+      ),
+    );
+  }
+}
+
+class _DashboardStatTile extends StatelessWidget {
+  const _DashboardStatTile({
+    required this.icon,
+    required this.label,
+    required this.value,
+    required this.detail,
+    required this.tint,
+  });
+
+  final IconData icon;
+  final String label;
+  final String value;
+  final String detail;
+  final Color tint;
+
+  @override
+  Widget build(BuildContext context) {
+    return GlassCard(
+      padding: const EdgeInsets.all(16),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Container(
+            width: 38,
+            height: 38,
+            decoration: BoxDecoration(
+              color: tint.withValues(alpha: 0.12),
+              borderRadius: BorderRadius.circular(12),
+            ),
+            child: Icon(icon, color: tint, size: 20),
+          ),
+          const SizedBox(height: 12),
+          Text(
+            label,
+            style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                  color: Theme.of(context)
+                      .textTheme
+                      .bodyMedium
+                      ?.color
+                      ?.withValues(alpha: 0.62),
+                ),
+          ),
+          const SizedBox(height: 4),
+          Text(
+            value,
+            style: Theme.of(context).textTheme.headlineSmall?.copyWith(
+                  fontWeight: FontWeight.w800,
+                ),
+          ),
+          const SizedBox(height: 4),
+          Text(
+            detail,
+            style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                  color: Theme.of(context)
+                      .textTheme
+                      .bodyMedium
+                      ?.color
+                      ?.withValues(alpha: 0.60),
+                ),
+          ),
         ],
       ),
     );
@@ -579,13 +750,13 @@ class _OfflineBanner extends StatelessWidget {
         ? const Color(0xFF0EA5E9).withValues(alpha: 0.12)
         : const Color(0xFFF59E0B).withValues(alpha: 0.16);
     final text = isOnline
-        ? 'Syncing drafts to Supabase...'
-        : 'Offline mode • tasks are saved locally';
+        ? 'Cloud backup in progress...'
+        : 'Offline mode • tasks stay on this phone';
     final pendingLabel = isSyncing
-        ? 'Syncing now'
+        ? 'Uploading or restoring your manual backup'
         : hasPending
-            ? 'Waiting for connection'
-            : 'Up to date';
+            ? 'Backup work is waiting'
+            : 'Reconnect only when you want to back up or restore tasks';
 
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),

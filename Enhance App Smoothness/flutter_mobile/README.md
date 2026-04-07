@@ -1,84 +1,50 @@
-# ToDoUp Flutter App
+# TodoUp Flutter App
 
-ToDoUp is a Flutter client backed directly by Supabase Auth and Postgres.
+TodoUp is a Flutter productivity app with Supabase-backed auth, task sync, reminders, and assistant-ready flows.
 
-## Production hardening included
+## Production-focused capabilities
 
-- Supabase-backed auth, profile sync, tasks, and assistant history
-- Session-aware app bootstrap with auth-state listener and guarded navigation
-- Pull-to-refresh, inline sync feedback, empty-state UX, and swipe-to-delete on tasks
-- Local reminder notifications with one-time and recurring schedules
-- Optional hosted AI assistant backend for model-based task drafting with confirmation
-- Smart home-screen widget sync with daily score and today task focus
-- GitHub Actions workflow for formatting, analysis, tests, web builds, and Android builds
-- `dart-define` support for release-time Supabase secrets
+- Supabase auth + profile/task sync
+- Guarded bootstrap with auth-state aware routing
+- Pull-to-refresh, inline sync feedback, and swipe-to-delete UX
+- Local reminder notifications (one-time and recurring)
+- Optional hosted assistant backend integration
+- Home widget sync and daily task focus support
+
+## Tech stack
+
+- Flutter 3.8+ / Dart 3.8+
+- supabase_flutter
+- flutter_local_notifications
+- home_widget
+- flutter_secure_storage
 
 ## Local development
-
-From [`flutter_mobile`](/c:/Users/Tanu%20Raj/Downloads/Enhance%20App%20Smoothness/flutter_mobile):
 
 ```powershell
 flutter pub get
 flutter run --dart-define=SUPABASE_URL=https://your-project.supabase.co --dart-define=SUPABASE_ANON_KEY=your-anon-key --dart-define=ASSISTANT_API_URL=https://your-ai-backend.example.com
 ```
 
-Android release artifacts:
+If `ASSISTANT_API_URL` is omitted, the app can fallback to local heuristic behavior.
+
+## Release builds
 
 ```powershell
 flutter build apk --release --dart-define=SUPABASE_URL=https://your-project.supabase.co --dart-define=SUPABASE_ANON_KEY=your-anon-key --dart-define=ASSISTANT_API_URL=https://your-ai-backend.example.com
 flutter build appbundle --release --dart-define=SUPABASE_URL=https://your-project.supabase.co --dart-define=SUPABASE_ANON_KEY=your-anon-key --dart-define=ASSISTANT_API_URL=https://your-ai-backend.example.com
 ```
 
-Supabase config is required at launch time. If those values are missing, the app shows an in-app bootstrap error screen with the exact `dart-define` names that must be supplied.
+## Required configuration
 
-If `ASSISTANT_API_URL` is configured, the AI assistant requests a task draft from your hosted backend and still requires explicit user confirmation before a task is added. Without it, the app falls back to the built-in heuristic draft.
-Release builds only accept `https://` assistant endpoints.
+- Run `supabase_bootstrap.sql` in your Supabase project
+- Configure auth redirect URLs (including deep links)
+- Pass all required `dart-define` values at build/run time
 
-## Supabase requirements
+## CI and release workflow
 
-- Apply [`supabase_bootstrap.sql`](/c:/Users/Tanu%20Raj/Downloads/Enhance%20App%20Smoothness/flutter_mobile/supabase_bootstrap.sql) to the target project
-- Configure email templates and redirect URLs in Supabase Auth
-- Add `todoup://auth/callback` to Supabase Auth redirect URLs for Android/iOS email confirmation
-- If email confirmation is enabled, users must confirm their email before first sign-in
-- iOS production bundle identifier is `app.todoup`
+The project supports CI checks for format, analyze, tests, and release artifacts. Configure secure secrets in your CI provider before shipping.
 
-## CI and release
+## License
 
-GitHub Actions workflow: [ci-cd.yml](/c:/Users/Tanu%20Raj/Downloads/Enhance%20App%20Smoothness/.github/workflows/ci-cd.yml)
-
-Required GitHub secrets for release builds:
-
-- `SUPABASE_URL`
-- `SUPABASE_ANON_KEY`
-- `ASSISTANT_API_URL` (recommended when shipping hosted AI drafting)
-- `ASSISTANT_API_URL` must use `https://` for release builds
-- `ANDROID_KEYSTORE_BASE64`
-- `ANDROID_KEYSTORE_PASSWORD`
-- `ANDROID_KEY_ALIAS`
-- `ANDROID_KEY_PASSWORD`
-
-The workflow runs:
-
-- `dart format --output=none --set-exit-if-changed lib test`
-- `flutter analyze`
-- `flutter test`
-- `flutter build web --release`
-- `flutter build apk --release`
-- `flutter build appbundle --release`
-
-Launch docs:
-
-- [`docs/production_launch_pack.md`](/c:/Users/Tanu%20Raj/Downloads/Enhance%20App%20Smoothness/flutter_mobile/docs/production_launch_pack.md)
-- [`docs/store_listing_template.md`](/c:/Users/Tanu%20Raj/Downloads/Enhance%20App%20Smoothness/flutter_mobile/docs/store_listing_template.md)
-- [`docs/privacy_policy.md`](/c:/Users/Tanu%20Raj/Downloads/Enhance%20App%20Smoothness/flutter_mobile/docs/privacy_policy.md)
-- [`docs/terms_of_service.md`](/c:/Users/Tanu%20Raj/Downloads/Enhance%20App%20Smoothness/flutter_mobile/docs/terms_of_service.md)
-
-## Still outside the repo
-
-These are necessary before a true public production launch:
-
-- Android/iOS signing and store submission assets
-- Crash reporting and product analytics
-- Secret rotation, staging/prod environment separation, and backup policy
-- Supabase console deep-link registration for email confirmation flows
-- iOS WidgetKit extension signing and Xcode verification on macOS
+See [../../LICENSE](../../LICENSE).

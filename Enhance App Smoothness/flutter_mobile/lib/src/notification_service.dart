@@ -25,6 +25,7 @@ class NotificationService {
   bool _notificationPermissionRequested = false;
   bool _exactAlarmPermissionRequested = false;
   bool _canUseExactAlarms = false;
+  static const int _diagnosticNotificationId = 2147483000;
 
   Future<void> initialize() async {
     if (_initialized || !_supportsNotifications) {
@@ -94,6 +95,44 @@ class NotificationService {
     )) {
       await cancelTaskReminder(task.id);
     }
+  }
+
+  Future<ReminderSystemReport> runReminderHealthCheck(
+    List<TaskItem> tasks, {
+    required bool enabled,
+    bool scheduleTestReminder = true,
+  }) async {
+    if (!_supportsNotifications) {
+      return const ReminderSystemReport(
+        notificationsSupported: false,
+        notificationsEnabled: false,
+        reminderTasks: 0,
+        scheduledNotifications: 0,
+        canUseExactAlarms: false,
+      );
+    }
+
+    await syncTaskReminders(tasks, enabled: enabled);
+
+    DateTime? testReminderAt;
+    if (enabled && scheduleTestReminder) {
+      await _requestPermissionsIfNeeded(requestExactAlarm: true);
+      testReminderAt = await _scheduleDiagnosticReminder();
+    }
+
+    final pending = await _plugin.pendingNotificationRequests();
+    final reminderTasks = tasks.where(_shouldScheduleReminder).length;
+
+    return ReminderSystemReport(
+      notificationsSupported: true,
+      notificationsEnabled: enabled,
+      reminderTasks: reminderTasks,
+      scheduledNotifications: pending.length,
+      canUseExactAlarms: _canUseExactAlarms,
+      notificationPermissionRequested: _notificationPermissionRequested,
+      exactAlarmPermissionRequested: _exactAlarmPermissionRequested,
+      diagnosticReminderAt: testReminderAt,
+    );
   }
 
   Future<void> cancelTaskReminder(String taskId) async {
@@ -191,6 +230,35 @@ class NotificationService {
     );
   }
 
+  Future<DateTime> _scheduleDiagnosticReminder() async {
+    final scheduledDate = tz.TZDateTime.now(
+      tz.local,
+    ).add(const Duration(seconds: 12));
+    final details = NotificationDetails(
+      android: AndroidNotificationDetails(
+        _channelId,
+        _channelName,
+        channelDescription: _channelDescription,
+        importance: Importance.max,
+        priority: Priority.high,
+      ),
+      iOS: const DarwinNotificationDetails(
+        interruptionLevel: InterruptionLevel.timeSensitive,
+      ),
+    );
+
+    await _plugin.cancel(id: _diagnosticNotificationId);
+    await _plugin.zonedSchedule(
+      id: _diagnosticNotificationId,
+      title: 'ToDoUp reminder check',
+      body: 'If this alert appears, notifications and alarm scheduling are working.',
+      scheduledDate: scheduledDate,
+      notificationDetails: details,
+      androidScheduleMode: _androidScheduleMode,
+    );
+    return scheduledDate;
+  }
+
   Future<void> _configureLocalTimeZone() async {
     if (kIsWeb) {
       return;
@@ -258,10 +326,7 @@ class NotificationService {
   }
 
   bool _shouldScheduleReminder(TaskItem task) {
-    if (!task.reminder || task.completed) {
-      return false;
-    }
-    return task.dueTime != null || task.repeat != 'None';
+    return task.reminder && !task.completed;
   }
 
   String _buildBody(TaskItem task) {
@@ -311,6 +376,28 @@ class NotificationService {
     }
     return Platform.isAndroid || Platform.isIOS;
   }
+}
+
+class ReminderSystemReport {
+  const ReminderSystemReport({
+    required this.notificationsSupported,
+    required this.notificationsEnabled,
+    required this.reminderTasks,
+    required this.scheduledNotifications,
+    required this.canUseExactAlarms,
+    this.notificationPermissionRequested = false,
+    this.exactAlarmPermissionRequested = false,
+    this.diagnosticReminderAt,
+  });
+
+  final bool notificationsSupported;
+  final bool notificationsEnabled;
+  final int reminderTasks;
+  final int scheduledNotifications;
+  final bool canUseExactAlarms;
+  final bool notificationPermissionRequested;
+  final bool exactAlarmPermissionRequested;
+  final DateTime? diagnosticReminderAt;
 }
 
 String _formatTimeLabel(int hour24, int minute) {

@@ -273,7 +273,7 @@ class TaskItem {
       title: json['title']?.toString() ?? '',
       completed: json['completed'] == true,
       dueDate: DateTime(dueDate.year, dueDate.month, dueDate.day),
-      dueLabel: json['dueLabel']?.toString() ?? _buildRelativeDueLabel(dueDate),
+      dueLabel: _buildRelativeDueLabel(dueDate),
       priority: taskPriorityFromApi(json['priority']?.toString()),
       category: taskCategoryFromApi(json['category']?.toString()),
       description: json['description']?.toString(),
@@ -294,9 +294,7 @@ class TaskItem {
     return apiTask.copyWith(
       localId: json['localId']?.toString() ?? apiTask.localId,
       serverId: json['serverId']?.toString() ?? apiTask.serverId,
-      syncStatus:
-          _syncStatusFromString(json['syncStatus']?.toString()) ??
-              apiTask.syncStatus,
+      syncStatus: _syncStatusFromString(json['syncStatus']?.toString()),
     );
   }
 
@@ -824,7 +822,11 @@ String _buildRelativeDueLabel(DateTime date) {
   if (difference == 1) {
     return 'Tomorrow';
   }
+  if (difference == -1) {
+    return 'Yesterday';
+  }
 
+  const weekdays = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
   const months = [
     'Jan',
     'Feb',
@@ -839,7 +841,12 @@ String _buildRelativeDueLabel(DateTime date) {
     'Nov',
     'Dec',
   ];
-  return '${months[date.month - 1]} ${date.day}';
+  final base =
+      '${weekdays[date.weekday - 1]}, ${months[date.month - 1]} ${date.day}';
+  if (date.year == now.year) {
+    return base;
+  }
+  return '$base, ${date.year}';
 }
 
 String buildRelativeDueLabel(DateTime date) => _buildRelativeDueLabel(date);

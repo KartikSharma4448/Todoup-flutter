@@ -18,20 +18,19 @@ class TaskRepository {
   final SupabaseService _supabaseService;
   final Uuid _uuid;
 
-  Future<void> init() => _localDatabase.init();
+  Future<void> init() async {
+    await _localDatabase.init();
+    await _localDatabase.clearPendingOperations();
+  }
 
   List<TaskItem> get cachedTasks => _localDatabase.getCachedTasks();
-  bool get hasPendingOperations => _localDatabase.hasPendingOperations;
+  List<TaskAttachment> get cachedAttachments =>
+      _localDatabase.getCachedAttachments();
+  bool get hasPendingOperations => false;
   UserProfile? get cachedProfile => _localDatabase.getCachedProfile();
 
   Future<void> cacheProfile(UserProfile profile) async {
     await _localDatabase.cacheProfile(profile);
-  }
-
-  Future<List<TaskItem>> refreshRemoteTasks() async {
-    final remoteTasks = await _supabaseService.getTasks();
-    await _localDatabase.cacheRemoteTasks(remoteTasks);
-    return remoteTasks;
   }
 
   Future<TaskItem> addTask({
@@ -63,11 +62,10 @@ class TaskRepository {
       dueTime: dueTime,
       createdAt: now,
       updatedAt: now,
-      syncStatus: TaskSyncStatus.pending,
+      syncStatus: TaskSyncStatus.synced,
     );
 
     await _localDatabase.upsertTask(task);
-    await _queuePendingOperation(task, PendingTaskOperationType.create);
     return task;
   }
 
@@ -81,11 +79,10 @@ class TaskRepository {
       completed: !task.completed,
       completedAt: !task.completed ? DateTime.now() : null,
       updatedAt: DateTime.now(),
-      syncStatus: TaskSyncStatus.pending,
+      syncStatus: TaskSyncStatus.synced,
     );
 
     await _localDatabase.upsertTask(updated);
-    await _queuePendingOperation(updated, PendingTaskOperationType.update);
     return updated;
   }
 
@@ -96,139 +93,52 @@ class TaskRepository {
     }
 
     await _localDatabase.removeTask(task.localId);
-
-    final pendingCreate = _localDatabase.getPendingOperation(
-      task.localId,
-      PendingTaskOperationType.create,
-    );
-    if (pendingCreate != null) {
-      await _localDatabase.removePendingOperation(pendingCreate.id);
-      return;
-    }
-
-    final deleteOp = PendingTaskOperation(
-      id: 'op-${_uuid.v4()}',
-      type: PendingTaskOperationType.delete,
-      localId: task.localId,
-      serverId: task.serverId,
-      payload: {},
-    );
-
-    await _localDatabase.savePendingOperation(deleteOp);
+    await _localDatabase.removeAttachmentsForTask(task.id);
   }
 
   Future<bool> syncPending() async {
-    final operations = _localDatabase.getPendingOperations();
-    if (operations.isEmpty) {
-      return false;
-    }
-
-    var synced = false;
-
-    for (final operation in operations) {
-      switch (operation.type) {
-        case PendingTaskOperationType.create:
-          final created = await _supabaseService.createTask(operation.payload);
-          await _localDatabase.removeTask(operation.localId);
-          await _localDatabase.removePendingOperation(operation.id);
-          await _localDatabase.upsertTask(
-            created.copyWith(
-              localId: created.id,
-              serverId: created.id,
-              syncStatus: TaskSyncStatus.synced,
-            ),
-          );
-          synced = true;
-          break;
-        case PendingTaskOperationType.update:
-          final serverId = operation.serverId ?? operation.payload['id']?.toString();
-          if (serverId == null) {
-            await _localDatabase.removePendingOperation(operation.id);
-            continue;
-          }
-          await _supabaseService.updateTask(serverId, operation.payload);
-          final stored = _localDatabase.getTaskByLocalId(operation.localId);
-          if (stored != null) {
-            await _localDatabase.upsertTask(stored.copyWith(
-              serverId: serverId,
-              syncStatus: TaskSyncStatus.synced,
-              updatedAt: DateTime.now(),
-            ));
-          }
-          await _localDatabase.removePendingOperation(operation.id);
-          synced = true;
-          break;
-        case PendingTaskOperationType.delete:
-          if (operation.serverId != null) {
-            await _supabaseService.deleteTask(operation.serverId!);
-          }
-          await _localDatabase.removeTask(operation.localId);
-          await _localDatabase.removePendingOperation(operation.id);
-          synced = true;
-          break;
-      }
-    }
-
-    if (synced) {
-      final remoteTasks = await _supabaseService.getTasks();
-      await _localDatabase.cacheRemoteTasks(remoteTasks);
-    }
-
-    return synced;
+    await _localDatabase.clearPendingOperations();
+    return false;
   }
 
   Future<List<TaskAttachment>> uploadAttachments(
     String taskId,
     List<PendingTaskAttachment> attachments,
-  ) {
-    return _supabaseService.uploadTaskAttachments(taskId, attachments);
+  ) async {
+    final timestamp = DateTime.now();
+    return List<TaskAttachment>.generate(attachments.length, (index) {
+      final attachment = attachments[index];
+      return TaskAttachment(
+        id: 'local-attachment-${_uuid.v4()}',
+        taskId: taskId,
+        storagePath: '',
+        fileName: attachment.fileName,
+        mimeType: attachment.mimeType,
+        sizeBytes: attachment.sizeBytes,
+        createdAt: timestamp,
+      );
+    }, growable: false);
   }
 
-  Future<void> _queuePendingOperation(
-    TaskItem task,
-    PendingTaskOperationType type,
-  ) async {
-    if (type == PendingTaskOperationType.create) {
-      final existing = _localDatabase.getPendingOperation(task.localId, type);
-      final operation = existing?.copyWith(
-            payload: task.toPayload(),
-            localId: task.localId,
-          ) ??
-          PendingTaskOperation(
-            id: 'op-${_uuid.v4()}',
-            type: PendingTaskOperationType.create,
-            localId: task.localId,
-            payload: task.toPayload(),
-          );
-      await _localDatabase.savePendingOperation(operation);
-      return;
-    }
+  Future<void> saveLocalAttachments(List<TaskAttachment> attachments) {
+    return _localDatabase.saveTaskAttachments(attachments);
+  }
 
-    if (task.serverId == null) {
-      final createOp = _localDatabase.getPendingOperation(
-        task.localId,
-        PendingTaskOperationType.create,
-      );
-      if (createOp != null) {
-        await _localDatabase.savePendingOperation(
-          createOp.copyWith(payload: task.toPayload()),
-        );
-        return;
-      }
-    }
+  Future<void> replaceLocalSnapshot({
+    required List<TaskItem> tasks,
+    List<TaskAttachment> attachments = const [],
+  }) async {
+    await _localDatabase.replaceTasks(tasks);
+    await _localDatabase.replaceAttachments(attachments);
+  }
 
-    final existing = _localDatabase.getPendingOperation(task.localId, type);
-    final operation = existing?.copyWith(
-          payload: task.toPayload(),
-          serverId: task.serverId,
-        ) ??
-        PendingTaskOperation(
-          id: 'op-${_uuid.v4()}',
-          type: type,
-          localId: task.localId,
-          serverId: task.serverId,
-          payload: task.toPayload(),
-        );
-    await _localDatabase.savePendingOperation(operation);
+  Future<int> uploadTasksBackup() async {
+    final tasks = cachedTasks;
+    await _supabaseService.replaceCloudTasks(tasks);
+    return tasks.length;
+  }
+
+  Future<List<TaskItem>> restoreTasksBackup() {
+    return _supabaseService.getTasks();
   }
 }

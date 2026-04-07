@@ -10,11 +10,13 @@ class LocalDatabaseService {
   static const _tasksBoxName = 'todo_tasks';
   static const _pendingBoxName = 'todo_pending_operations';
   static const _profileBoxName = 'todo_profile';
+  static const _attachmentsBoxName = 'todo_task_attachments';
 
   bool _initialized = false;
   late final Box<Map> _tasksBox;
   late final Box<Map> _pendingBox;
   late final Box<Map> _profileBox;
+  late final Box<Map> _attachmentsBox;
 
   Future<void> init() async {
     if (_initialized) {
@@ -24,6 +26,7 @@ class LocalDatabaseService {
     _tasksBox = await Hive.openBox<Map>(_tasksBoxName);
     _pendingBox = await Hive.openBox<Map>(_pendingBoxName);
     _profileBox = await Hive.openBox<Map>(_profileBoxName);
+    _attachmentsBox = await Hive.openBox<Map>(_attachmentsBoxName);
     _initialized = true;
   }
 
@@ -57,6 +60,18 @@ class LocalDatabaseService {
 
   Future<void> removeTask(String localId) async {
     await _tasksBox.delete(localId);
+  }
+
+  Future<void> replaceTasks(List<TaskItem> tasks) async {
+    await _tasksBox.clear();
+    if (tasks.isEmpty) {
+      return;
+    }
+
+    final entries = <String, Map<String, dynamic>>{
+      for (final task in tasks) task.localId: task.toJson(),
+    };
+    await _tasksBox.putAll(entries);
   }
 
   Future<void> cacheRemoteTasks(List<TaskItem> remote) async {
@@ -112,6 +127,50 @@ class LocalDatabaseService {
 
   bool get hasPendingOperations => _pendingBox.isNotEmpty;
 
+  Future<void> clearPendingOperations() async {
+    await _pendingBox.clear();
+  }
+
+  List<TaskAttachment> getCachedAttachments() {
+    return _attachmentsBox.values
+        .map((raw) => TaskAttachment.fromApi(Map<String, dynamic>.from(raw)))
+        .toList(growable: false);
+  }
+
+  Future<void> saveTaskAttachments(List<TaskAttachment> attachments) async {
+    if (attachments.isEmpty) {
+      return;
+    }
+
+    final entries = <String, Map<String, dynamic>>{
+      for (final attachment in attachments) attachment.id: attachment.toJson(),
+    };
+    await _attachmentsBox.putAll(entries);
+  }
+
+  Future<void> removeAttachmentsForTask(String taskId) async {
+    final keysToRemove = <dynamic>[];
+    for (final entry in _attachmentsBox.toMap().entries) {
+      final attachment = TaskAttachment.fromApi(
+        Map<String, dynamic>.from(entry.value),
+      );
+      if (attachment.taskId == taskId) {
+        keysToRemove.add(entry.key);
+      }
+    }
+
+    if (keysToRemove.isEmpty) {
+      return;
+    }
+
+    await _attachmentsBox.deleteAll(keysToRemove);
+  }
+
+  Future<void> replaceAttachments(List<TaskAttachment> attachments) async {
+    await _attachmentsBox.clear();
+    await saveTaskAttachments(attachments);
+  }
+
   Future<void> cacheProfile(UserProfile profile) async {
     await _profileBox.put('profile', profile.toJson());
   }
@@ -132,5 +191,6 @@ class LocalDatabaseService {
     await _tasksBox.clear();
     await _pendingBox.clear();
     await _profileBox.clear();
+    await _attachmentsBox.clear();
   }
 }

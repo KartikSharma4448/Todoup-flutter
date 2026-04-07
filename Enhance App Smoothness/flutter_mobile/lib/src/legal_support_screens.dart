@@ -43,7 +43,7 @@ class SupportScreen extends StatelessWidget {
                 ),
                 const SizedBox(height: 12),
                 Text(
-                  'Contact the ToDoUp support desk for account issues, billing questions, task-sync problems, or release support.',
+                  'Contact the ToDoUp support desk for account issues, billing questions, reminder problems, cloud backup restore issues, or release support.',
                   style: Theme.of(context).textTheme.bodyMedium,
                 ),
                 const SizedBox(height: 16),
@@ -110,17 +110,17 @@ class PrivacyPolicyScreen extends StatelessWidget {
     (
       heading: 'Scope',
       body:
-          'ToDoUp collects only the information required to create your account, sync your tasks, and keep your settings available across supported devices.',
+          'ToDoUp collects only the information required to create your account, keep tasks on your device, and support optional cloud backup and restore when you choose to use it.',
     ),
     (
       heading: 'Data we store',
       body:
-          'This includes your profile information, tasks, assistant history, and app preferences. Authentication is handled by Supabase Auth and application records are stored in Supabase Postgres.',
+          'This includes your profile information, locally stored tasks, assistant history, and app preferences. Authentication is handled by Supabase Auth, and optional cloud backup data is stored in Supabase Postgres.',
     ),
     (
       heading: 'How data is used',
       body:
-          'Your data is used to sign you in, show your dashboard, process task updates, and maintain assistant-generated task drafts. Data is not sold to third parties.',
+          'Your data is used to sign you in, show your dashboard, schedule reminders, process optional cloud backups, and maintain assistant-generated task drafts. Data is not sold to third parties.',
     ),
     (
       heading: 'Retention and deletion',
@@ -143,7 +143,7 @@ class PrivacyPolicyScreen extends StatelessWidget {
   Widget build(BuildContext context) {
     return _LegalDocumentScreen(
       title: 'Privacy Policy',
-      lastUpdated: 'March 6, 2026',
+      lastUpdated: 'April 2, 2026',
       sections: _sections,
     );
   }
@@ -191,7 +191,7 @@ class TermsOfServiceScreen extends StatelessWidget {
   Widget build(BuildContext context) {
     return _LegalDocumentScreen(
       title: 'Terms of Service',
-      lastUpdated: 'March 6, 2026',
+      lastUpdated: 'April 2, 2026',
       sections: _sections,
     );
   }

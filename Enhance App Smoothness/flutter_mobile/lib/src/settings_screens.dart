@@ -219,6 +219,12 @@ class SettingsScreen extends StatelessWidget {
 
   static const routeName = '/settings';
 
+  void _showMessage(BuildContext context, String message) {
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(SnackBar(content: Text(message)));
+  }
+
   Future<void> _signOut(BuildContext context) async {
     final controller = TodoAppScope.of(context);
     try {
@@ -243,13 +249,109 @@ class SettingsScreen extends StatelessWidget {
       return;
     }
 
-    ScaffoldMessenger.of(context)
-      ..hideCurrentSnackBar()
-      ..showSnackBar(
-        const SnackBar(
-          content: Text('Your account data has been copied as JSON.'),
-        ),
+    _showMessage(context, 'Your account data has been copied as JSON.');
+  }
+
+  Future<void> _uploadCloudBackup(BuildContext context) async {
+    final controller = TodoAppScope.of(context);
+    final success = await controller.uploadTasksToCloud();
+    if (!context.mounted) {
+      return;
+    }
+
+    _showMessage(
+      context,
+      success
+          ? 'All local tasks were uploaded to your cloud backup.'
+          : controller.error ?? 'Unable to upload the cloud backup.',
+    );
+  }
+
+  Future<void> _restoreCloudBackup(BuildContext context) async {
+    final confirmed =
+        await showDialog<bool>(
+          context: context,
+          builder: (dialogContext) {
+            return AlertDialog(
+              title: const Text('Restore cloud backup?'),
+              content: const Text(
+                'This replaces the tasks on this device with the last backup stored in the cloud. Local attachment files are not restored yet.',
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.of(dialogContext).pop(false),
+                  child: const Text('Cancel'),
+                ),
+                FilledButton(
+                  onPressed: () => Navigator.of(dialogContext).pop(true),
+                  child: const Text('Restore'),
+                ),
+              ],
+            );
+          },
+        ) ??
+        false;
+
+    if (!confirmed || !context.mounted) {
+      return;
+    }
+
+    final controller = TodoAppScope.of(context);
+    final restoredCount = await controller.restoreTasksFromCloud();
+    if (!context.mounted) {
+      return;
+    }
+
+    _showMessage(
+      context,
+      restoredCount == null
+          ? controller.error ?? 'Unable to restore your cloud backup.'
+          : 'Restored $restoredCount task${restoredCount == 1 ? '' : 's'} from the cloud.',
+    );
+  }
+
+  Future<void> _runReminderCheck(BuildContext context) async {
+    final controller = TodoAppScope.of(context);
+
+    try {
+      final report = await controller.runReminderSystemCheck();
+      if (!context.mounted) {
+        return;
+      }
+
+      final details = <String>[
+        'Reminders enabled: ${report.notificationsEnabled ? 'Yes' : 'No'}',
+        'Tasks with reminders: ${report.reminderTasks}',
+        'Notifications currently scheduled: ${report.scheduledNotifications}',
+        'Exact alarms available: ${report.canUseExactAlarms ? 'Yes' : 'No'}',
+      ];
+      if (report.diagnosticReminderAt != null) {
+        details.add(
+          'Test alert scheduled for ${formatTimeOfDayLabel(TimeOfDay.fromDateTime(report.diagnosticReminderAt!))}.',
+        );
+      }
+
+      await showDialog<void>(
+        context: context,
+        builder: (dialogContext) {
+          return AlertDialog(
+            title: const Text('Reminder System Check'),
+            content: Text(details.join('\n')),
+            actions: [
+              FilledButton(
+                onPressed: () => Navigator.of(dialogContext).pop(),
+                child: const Text('OK'),
+              ),
+            ],
+          );
+        },
       );
+    } catch (error) {
+      if (!context.mounted) {
+        return;
+      }
+      _showMessage(context, error.toString().replaceFirst('Exception: ', ''));
+    }
   }
 
   Future<void> _deleteAccount(BuildContext context) async {
@@ -307,17 +409,35 @@ class SettingsScreen extends StatelessWidget {
     if (!context.mounted) {
       return;
     }
-    ScaffoldMessenger.of(context)
-      ..hideCurrentSnackBar()
-      ..showSnackBar(
-        SnackBar(
-          content: Text(
-            controller.isPremium
-                ? 'Premium unlocked. Enjoy the pro features!'
-                : 'Premium status updated.',
-          ),
-        ),
-      );
+    _showMessage(
+      context,
+      controller.isPremium
+          ? 'Premium unlocked. Enjoy the pro features!'
+          : 'Premium status updated.',
+    );
+  }
+
+  String _cloudBackupLabel(TodoAppController controller) {
+    final backupAt = controller.lastCloudBackupAt;
+    if (backupAt == null) {
+      return controller.isOnline
+          ? 'Tasks stay on this device until you upload them manually.'
+          : 'Reconnect whenever you want to upload or restore a backup.';
+    }
+
+    return 'Last upload: ${formatRelativeAndAbsoluteDate(backupAt)} • ${formatTimeOfDayLabel(TimeOfDay.fromDateTime(backupAt))}';
+  }
+
+  String _reminderSummary(TodoAppController controller) {
+    final report = controller.lastReminderReport;
+    if (report == null) {
+      return 'Run a system check to verify notifications, alarms, and scheduled reminders on this phone.';
+    }
+
+    final testText = report.diagnosticReminderAt == null
+        ? 'No test reminder scheduled.'
+        : 'Test reminder at ${formatTimeOfDayLabel(TimeOfDay.fromDateTime(report.diagnosticReminderAt!))}.';
+    return 'Eligible tasks: ${report.reminderTasks} • Scheduled: ${report.scheduledNotifications}. $testText';
   }
 
   @override
@@ -371,7 +491,7 @@ class SettingsScreen extends StatelessWidget {
                                 Text(
                                   controller.isPremium
                                       ? 'Unlimited attachments, AI drafts, smart widgets.'
-                                      : 'Unlock unlimited attachments, AI drafting, and widget sync.',
+                                      : 'Unlock unlimited attachments, AI drafting, and widget extras.',
                                   style: Theme.of(context)
                                       .textTheme
                                       .bodyMedium
@@ -396,7 +516,7 @@ class SettingsScreen extends StatelessWidget {
                           _PremiumPerk(label: 'Unlimited attachments'),
                           _PremiumPerk(label: 'AI assistant drafts'),
                           _PremiumPerk(label: 'Home-screen widgets'),
-                          _PremiumPerk(label: 'Priority sync'),
+                          _PremiumPerk(label: 'Cloud backup vault'),
                         ],
                       ),
                       const SizedBox(height: 14),
@@ -418,10 +538,176 @@ class SettingsScreen extends StatelessWidget {
                   child: SwitchListTile.adaptive(
                     contentPadding: EdgeInsets.zero,
                     title: const Text('Notifications'),
-                    subtitle: const Text('Task reminders and updates'),
+                    subtitle: const Text('Local reminders stored on this device'),
                     secondary: const Icon(Icons.notifications_active_rounded),
                     value: controller.notificationsEnabled,
                     onChanged: (value) => controller.setNotifications(value),
+                  ),
+                ),
+                const SizedBox(height: 16),
+                GlassCard(
+                  padding: const EdgeInsets.all(18),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Row(
+                        children: [
+                          Container(
+                            width: 44,
+                            height: 44,
+                            decoration: BoxDecoration(
+                              gradient: const LinearGradient(
+                                colors: [Color(0xFF0F766E), Color(0xFF14B8A6)],
+                              ),
+                              borderRadius: BorderRadius.circular(14),
+                            ),
+                            child: const Icon(
+                              Icons.cloud_upload_rounded,
+                              color: Colors.white,
+                            ),
+                          ),
+                          const SizedBox(width: 12),
+                          Expanded(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text(
+                                  'Offline-First Task Vault',
+                                  style: Theme.of(context).textTheme.titleMedium,
+                                ),
+                                const SizedBox(height: 4),
+                                Text(
+                                  _cloudBackupLabel(controller),
+                                  style: Theme.of(context)
+                                      .textTheme
+                                      .bodyMedium
+                                      ?.copyWith(
+                                        color: Theme.of(context)
+                                            .textTheme
+                                            .bodyMedium
+                                            ?.color
+                                            ?.withValues(alpha: 0.68),
+                                      ),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 14),
+                      Container(
+                        padding: const EdgeInsets.all(14),
+                        decoration: BoxDecoration(
+                          color: Theme.of(context).brightness == Brightness.dark
+                              ? AppColors.mutedDark.withValues(alpha: 0.36)
+                              : AppColors.mutedLight,
+                          borderRadius: BorderRadius.circular(18),
+                        ),
+                        child: Text(
+                          controller.isOnline
+                              ? 'Tasks now run fully offline. Use Upload to Cloud only when you want a backup, and Restore after reinstalling the app.'
+                              : 'You are offline right now. Your tasks still work normally; cloud backup will be available again when the internet returns.',
+                          style: Theme.of(context).textTheme.bodyMedium,
+                        ),
+                      ),
+                      const SizedBox(height: 14),
+                      Row(
+                        children: [
+                          Expanded(
+                            child: PrimaryGradientButton(
+                              label: controller.isSyncing
+                                  ? 'Uploading...'
+                                  : 'Upload to Cloud',
+                              icon: Icons.cloud_upload_rounded,
+                              onPressed: controller.isSyncing
+                                  ? null
+                                  : () => _uploadCloudBackup(context),
+                            ),
+                          ),
+                          const SizedBox(width: 12),
+                          Expanded(
+                            child: MutedButton(
+                              label: controller.isSyncing
+                                  ? 'Please wait'
+                                  : 'Restore Backup',
+                              onPressed: controller.isSyncing
+                                  ? () {}
+                                  : () => _restoreCloudBackup(context),
+                            ),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 12),
+                      Text(
+                        'Cloud restore currently brings back your tasks. Local file attachments stay on the device and are not part of the backup yet.',
+                        style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                              color: Theme.of(context)
+                                  .textTheme
+                                  .bodySmall
+                                  ?.color
+                                  ?.withValues(alpha: 0.72),
+                            ),
+                      ),
+                    ],
+                  ),
+                ),
+                const SizedBox(height: 16),
+                GlassCard(
+                  padding: const EdgeInsets.all(18),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Row(
+                        children: [
+                          Container(
+                            width: 44,
+                            height: 44,
+                            decoration: BoxDecoration(
+                              gradient: const LinearGradient(
+                                colors: [Color(0xFFF59E0B), Color(0xFFEF4444)],
+                              ),
+                              borderRadius: BorderRadius.circular(14),
+                            ),
+                            child: const Icon(
+                              Icons.alarm_on_rounded,
+                              color: Colors.white,
+                            ),
+                          ),
+                          const SizedBox(width: 12),
+                          Expanded(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text(
+                                  'Reminder & Alarm Check',
+                                  style: Theme.of(context).textTheme.titleMedium,
+                                ),
+                                const SizedBox(height: 4),
+                                Text(
+                                  _reminderSummary(controller),
+                                  style: Theme.of(context)
+                                      .textTheme
+                                      .bodyMedium
+                                      ?.copyWith(
+                                        color: Theme.of(context)
+                                            .textTheme
+                                            .bodyMedium
+                                            ?.color
+                                            ?.withValues(alpha: 0.68),
+                                      ),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 14),
+                      PrimaryGradientButton(
+                        label: 'Run Reminder Test',
+                        icon: Icons.notifications_active_rounded,
+                        onPressed: () => _runReminderCheck(context),
+                      ),
+                    ],
                   ),
                 ),
                 const SizedBox(height: 16),
@@ -517,9 +803,9 @@ class SettingsScreen extends StatelessWidget {
                         leading: Icon(Icons.info_outline_rounded),
                         title: Text('App Information'),
                       ),
-                      _InfoRow(label: 'Version', value: '1.0.3'),
+                      _InfoRow(label: 'Version', value: '1.1.0'),
                       SizedBox(height: 8),
-                      _InfoRow(label: 'Build', value: '2026.03.06'),
+                      _InfoRow(label: 'Build', value: '2026.04.02'),
                     ],
                   ),
                 ),

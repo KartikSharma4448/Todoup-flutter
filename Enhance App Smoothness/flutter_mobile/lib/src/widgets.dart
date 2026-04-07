@@ -442,6 +442,8 @@ class TaskCard extends StatelessWidget {
     final subdued = Theme.of(
       context,
     ).textTheme.bodyMedium?.color?.withValues(alpha: 0.60);
+    final scheduleLabel = formatTaskScheduleLabel(task);
+    final overdue = isTaskOverdue(task);
 
     return GlassCard(
       onTap: onTap,
@@ -518,6 +520,8 @@ class TaskCard extends StatelessWidget {
                   const SizedBox(height: 8),
                   Text(
                     task.description!,
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
                     style: Theme.of(
                       context,
                     ).textTheme.bodySmall?.copyWith(color: subdued),
@@ -531,8 +535,13 @@ class TaskCard extends StatelessWidget {
                   children: [
                     _MetaChip(
                       icon: Icons.calendar_today_rounded,
-                      label: task.dueLabel,
+                      label: scheduleLabel,
                     ),
+                    if (overdue)
+                      const _MetaChip(
+                        icon: Icons.warning_amber_rounded,
+                        label: 'Overdue',
+                      ),
                     Icon(
                       Icons.flag_rounded,
                       size: 14,
@@ -935,6 +944,13 @@ class _AddTaskSheetState extends State<AddTaskSheet> {
                             title: 'Attachments',
                           ),
                           const SizedBox(height: 10),
+                          Text(
+                            'Attachment names stay available on this device. Cloud backup currently restores tasks only.',
+                            style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                                  color: subdued,
+                                ),
+                          ),
+                          const SizedBox(height: 10),
                           Row(
                             children: [
                               Expanded(
@@ -1032,7 +1048,7 @@ class _AddTaskSheetState extends State<AddTaskSheet> {
                                 child: _PickerTile(
                                   icon: Icons.calendar_today_rounded,
                                   label: 'Due Date',
-                                  value: relativeDueLabel(_dueDate),
+                                  value: formatRelativeAndAbsoluteDate(_dueDate),
                                   onTap: _pickDate,
                                 ),
                               ),
@@ -1314,8 +1330,13 @@ class TaskDetailsSheet extends StatelessWidget {
                       children: [
                         _MetaChip(
                           icon: Icons.calendar_today_rounded,
-                          label: task.dueLabel,
+                          label: formatTaskScheduleLabel(task),
                         ),
+                        if (isTaskOverdue(task))
+                          const _MetaChip(
+                            icon: Icons.warning_amber_rounded,
+                            label: 'Overdue',
+                          ),
                         _CategoryChip(category: task.category),
                         _MetaChip(
                           icon: Icons.flag_rounded,
